@@ -176,7 +176,7 @@ def score(
     cost_estimate_pct: float,
     hours_to_reset: float,
 ) -> float:
-    """Compute D7 binding-window pace score:
+    """Compute binding-window pace score:
 
     pace = (remaining_pct - red_line_pct - reserve_pct - cost_estimate_pct) / max(hours, 0.25)
 
@@ -577,7 +577,7 @@ def admit(
         )
 
     # Unattended scheduler dispatch (requirements is not None):
-    # F1: B and D postures NEVER become eligible for unattended scheduler dispatch.
+    # B and D postures NEVER become eligible for unattended scheduler dispatch.
     # An unattended job has no owner override.
     if requirements is not None:
         if posture.reason in (POSTURE_ATTENDED_ONLY, POSTURE_METERED):
@@ -674,7 +674,7 @@ def admit(
     else:
         drawn_pools = pools_for(candidate, pool_policies)
 
-    # Safely derive active reservation charges from db if not explicitly supplied (F2)
+    # Safely derive active reservation charges from db if not explicitly supplied
     if reservations is None and db is not None:
         try:
             if check_capacity_tables_exist(db):
@@ -789,7 +789,7 @@ def admit(
                         if s_win == win.id:
                             break
 
-            # Check D4 overage rule
+            # Check overage rule
             if pool_pol.overage_possible:
                 is_stale_or_missing = False
                 if matched_state is None:
@@ -839,7 +839,7 @@ def admit(
                 remaining = 100.0
             observed_remaining = remaining
 
-            # Subtract outstanding charges (reservations / settled) since observation (F2)
+            # Subtract outstanding charges (reservations / settled) since observation
             prior_charges = 0.0
             if reservations is not None:
                 prior_charges = float(reservations.get((pool_id, win.id), 0.0))
@@ -867,7 +867,7 @@ def admit(
                 # A red line caused only by synthetic post-observation charges
                 # is not evidence that the vendor pool is low.  Offer the safe
                 # zero-inference probe seam so the dispatch boundary can
-                # refresh before it refuses (N7).  A genuinely low fresh pool
+                # refresh before it refuses. A genuinely low fresh pool
                 # has no charges and keeps the refusal unchanged.
                 probe_harness = _POOL_TO_HARNESS.get(pool_id)
                 can_probe = (
@@ -913,7 +913,7 @@ def admit(
                 prior_charges,
             ))
 
-    # Build draws for all drawn pools (F2)
+    # Build draws for all drawn pools
     all_draws: list[PoolDraw] = []
     for pid in drawn_pools:
         mult_val = 1.0
@@ -994,7 +994,7 @@ def order_candidates_for_role(
     reservations: Mapping[tuple[str, str], float] | None = None,
     strong_start: bool = False,
 ) -> list[WorkerCandidate]:
-    """Order candidates within fallback groups by D7 intra-group pacing score.
+    """Order candidates within fallback groups by intra-group pacing score.
 
     Preserves group fallback order: Group 0 candidates are tried before Group 1.
     Within each group, candidates are scored using admit() and ordered:

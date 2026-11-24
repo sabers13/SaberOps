@@ -496,7 +496,7 @@ def parse_review_output(output_text: str, is_final: bool = False) -> tuple[Revie
     verdict = ReviewVerdict.BLOCK
     summary = "Review completed"
 
-    # Step 1: Scan line-by-line for explicit verdict lines.
+    # Scan line-by-line for explicit verdict lines.
     # Anchored as their own line with case-insensitivity and surrounding whitespace allowed.
     explicit_verdicts: list[tuple[int, ReviewVerdict]] = []
     for idx, raw_line in enumerate(text.splitlines()):
@@ -567,7 +567,7 @@ def parse_review_output(output_text: str, is_final: bool = False) -> tuple[Revie
                 summary = blocker_lines[0][:300] if blocker_lines else "Reviewer blocked changes"
         return verdict, summary, text
 
-    # Step 2: Fall back to existing keyword heuristics when no explicit verdict line exists.
+    # Fall back to existing keyword heuristics when no explicit verdict line exists.
     upper_text = text.upper()
     if "VERDICT:" in upper_text:
         return (
@@ -1102,7 +1102,7 @@ class ReviewEngine:
         review_dispatches: list[DispatchEvidence] = []
         skipped_candidate_details: list[dict[str, object]] = []
         # A stale-evidence refusal is refreshed at most once per reviewer
-        # provider in this review cycle (A5's bounded admission rule), so a
+        # provider in this review cycle (the bounded admission rule), so a
         # probe that cannot produce fresh evidence never loops.
         probed_providers: set[str] = set()
         # The authoritative owner binding registry the launch
@@ -1260,7 +1260,7 @@ class ReviewEngine:
                 # stale evidence or synthetic charges that crossed a red line,
                 # exactly as the worker preflight does.  A probe that cannot run
                 # (e.g. an interactive-only harness) or fails leaves the
-                # refusal intact (N7/D14).
+                # refusal intact.
                 probed_providers.add(candidate.provider)
                 from saberops.capacity.probes import try_safe_quota_probe
                 from saberops.control_plane.plans import effective_quota_pools

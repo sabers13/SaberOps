@@ -1,8 +1,8 @@
-"""F15: auto-accept an eligible local candidate while the owner is away.
+"""Auto-accept an eligible local candidate while the owner is away.
 
-The owner approved automatic acceptance of a local commit on 2026-11-19, in
-``away`` and ``critical-only`` only, never in ``ask-me`` where the owner
-approves every accept (see ADR-0008 section 4).  This module is the one seam
+Automatic acceptance of a local commit runs in ``away`` and ``critical-only``
+only, never in ``ask-me`` where the owner approves every accept
+(ADR-0008).  This module is the one seam
 that turns that answer into engine behaviour:
 
 * The mode gate is :func:`saberops.owner_mode.decide_owner_action` for
@@ -69,7 +69,7 @@ __all__ = [
 AUTO_ACCEPT_EVENT: Final[str] = "auto_accept_completed"
 
 #: Durable audit event recorded once per candidate the engine parks for the
-#: owner because it is consequential (H20).
+#: owner because it is consequential.
 AUTO_ACCEPT_PARKED_EVENT: Final[str] = "auto_accept_parked"
 
 #: Durable audit event recorded by the one-command undo.
@@ -87,7 +87,7 @@ _ACCEPTING_MODES: Final[frozenset[OwnerMode]] = frozenset(
 
 #: Directory names that hold data migrations.  An applied migration is not
 #: undone by reverting the code, so the engine treats any change under one as
-#: consequential no matter what the planner recorded (H20).
+#: consequential no matter what the planner recorded.
 _MIGRATION_DIRECTORY_NAMES: Final[frozenset[str]] = frozenset(
     {"migration", "migrations"}
 )
@@ -221,7 +221,7 @@ class AutoAcceptDecision:
     reason: str
     checks: tuple[AutoAcceptCheck, ...]
     #: True when the candidate would otherwise auto-accept but the engine
-    #: parks it for the owner because it is consequential (H20).  Independent
+    #: parks it for the owner because it is consequential. Independent
     #: work continues; the candidate stays unaccepted.
     park_for_owner: bool = False
     #: Why it is consequential; empty when it is not.
@@ -516,7 +516,7 @@ def evaluate_auto_accept(
         f"candidate is commit {candidate_sha[:8]} from attempt #{attempt.attempt_number}",
     )
 
-    # H6 (ADR-0016): the away-mode pass must never accept past a steering note
+    # The away-mode pass must never accept past a steering note
     # that never reached a worker.  The owner is told to redirect or discard it;
     # until then the candidate is not auto-acceptable.
     pending_notes = undelivered_notes_for_run(db, run_id)
@@ -620,7 +620,7 @@ def evaluate_auto_accept(
         )
     _check(checks, "checklist", True, "every acceptance check passes")
 
-    # H20: modes stop at what is actually consequential.  The candidate would
+    # Modes stop at what is actually consequential.  The candidate would
     # auto-accept, but a data migration, a mass deletion or the planner's own
     # marker parks it for the owner instead.  The planner can only add; the
     # engine's floor is computed here from the diff and never read from the
@@ -712,7 +712,7 @@ def _park_consequential(
     decision: AutoAcceptDecision,
     notifier: Any | None,
 ) -> AutoAcceptOutcome:
-    """Record and announce one candidate the engine parks for the owner (H20).
+    """Record and announce one candidate the engine parks for the owner.
 
     The event is written once per candidate so a scheduler tick that sees the
     same parked candidate again does not append duplicate evidence; the notice

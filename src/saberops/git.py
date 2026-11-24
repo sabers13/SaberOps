@@ -473,7 +473,7 @@ class GitManager:
     ) -> Path:
         """Create a scratch worktree checked out detached at ``start_point``.
 
-        Used for read-only work (F26 advisor calls) that must never create a
+        Used for read-only work (advisor calls) that must never create a
         branch or move any ref.  The same repository-global worktree metadata
         lock as :meth:`create_worktree` serializes the mutation.
         """

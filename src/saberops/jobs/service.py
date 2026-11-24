@@ -1,4 +1,4 @@
-"""Job service functions (M2-3 section F): the future MCP surface (D6).
+"""Job service functions: the MCP surface.
 
 All functions take ``db: Database`` first; injectables are keyword-only.
 Each validates input before any write. No provider, model, tier or
@@ -113,7 +113,7 @@ class JobDispatchSpec:
     """Frozen job -> run mapping (section H).
 
     The ``request`` carries no frozen policy: freezing happens when
-    M2-4b calls ``resolve_effective_run_config`` at dispatch, so a job
+    calls ``resolve_effective_run_config`` at dispatch, so a job
     that waits for days gets the policy of the day it runs.
     ``base_ref``/``base_sha``/``effort``/``size_hint`` travel beside the
     request because ``RunRequest`` has no field for them today.
@@ -131,7 +131,7 @@ class JobDispatchSpec:
 
 @dataclass(frozen=True)
 class PoolCapacity:
-    """C5 read model: same eight fields, names, types and order as LedgerEstimate."""
+    """Capacity read model: same eight fields, names, types and order as LedgerEstimate."""
 
     pool_id: str
     window_id: str
@@ -249,8 +249,9 @@ def _request_digest(
 ) -> str:
     requirement_payload = requirements.to_dict()
     # A default difficulty must not change the identity of a request stored
-    # before H1: routine is the historical meaning of "no difficulty", so the
-    # key is omitted entirely (exactly the pre-H1 canonical payload).
+    # before the field existed: routine is the historical meaning of "no
+    # difficulty", so the key is omitted entirely (the canonical payload
+    # without difficulty).
     if requirement_payload.get("difficulty") == Difficulty.ROUTINE.value:
         requirement_payload.pop("difficulty", None)
     canonical = {
@@ -261,7 +262,7 @@ def _request_digest(
         "depends_on": list(depends_on),
         "goal": goal,
         # Only a scout changes the request identity: an ordinary BUILD job's
-        # digest must stay identical to an idempotency key stored before F19.
+        # digest must stay identical to an idempotency key stored by an older build.
         "kind": kind.value if kind is not JobKind.BUILD else None,
         "not_before": not_before,
         "priority": priority.value,
@@ -309,7 +310,7 @@ def submit_job(
         raise ValueError("requirements must be a JobRequirements")
     job_kind = coerce_job_kind(kind)
     if job_kind is JobKind.SCOUT:
-        # F19/H8: read-only is enforced by the job kind, not requested by the
+        # Read-only is enforced by the job kind, not requested by the
         # caller, and an unstated effort is the cheap default.  Both are in
         # force *before* feasibility and request identity so the stored job,
         # its digest and its dispatch agree.
@@ -439,7 +440,7 @@ def promote_scout(
     routing: RoutingSnapshot | None = None,
     now: datetime | None = None,
 ) -> SubmitResult:
-    """Start a build job whose starting context is a scout report (F19).
+    """Start a build job whose starting context is a scout report.
 
     The report is the scout's durable deliverable, so promotion copies its
     bounded text into the new job's goal and records the lineage on both job
@@ -524,8 +525,7 @@ def note_job(
     the job's next worker attempt starts, whose prompt is the next safe point,
     and delivery is recorded once on that attempt.  Notes for terminal jobs
     are refused because no boundary remains to deliver them; ``allow_terminal``
-    exists only for a resume that starts that next attempt in the same call
-    (H7).
+    exists only for a resume that starts that next attempt in the same call.
     """
     job = store.get_job(db, job_id)
     if job is None:
@@ -713,7 +713,7 @@ def cancel_job(
 
         native = native_run_marker(db, job.current_run_id) is not None
         if native:
-            # F16: SaberOps cannot kill a native child.  It posts the stop the
+            # SaberOps cannot kill a native child.  It posts the stop the
             # orchestrator acts on, cancels the job so the child's report is
             # refused, and never claims the process is gone.
             request_native_stop(
@@ -750,7 +750,7 @@ def cancel_job(
 
 
 def capacity(db: Any, now: datetime | None = None) -> CapacityView:
-    """Return the ledger snapshot through the C5 capacity read model."""
+    """Return the ledger snapshot through the capacity read model."""
     from saberops.capacity.ledger import snapshot
 
     moment = now if now is not None else datetime.now(UTC)
@@ -886,7 +886,7 @@ def requeue(
     not_before: str | None = None,
     now: datetime | None = None,
 ) -> Job:
-    """RUNNING -> QUEUED (dispatch side; preemption is M2-5)."""
+    """RUNNING -> QUEUED (dispatch side)."""
     clean_not_before = (
         _parse_aware_instant(not_before, field="not_before")
         if not_before is not None
@@ -907,7 +907,7 @@ def requeue_preemption(
     not_before: str | None = None,
     now: datetime | None = None,
 ) -> Job:
-    """RUNNING -> QUEUED fenced to the exact preempted generation (D8).
+    """RUNNING -> QUEUED fenced to the exact preempted generation.
 
     Unlike :func:`requeue` this refuses an A-B-A on the job row: the CAS
     requires ``current_run_id == expected_run_id`` and
@@ -934,7 +934,7 @@ def requeue_preemption(
 
 @dataclass(frozen=True)
 class PreemptionSettlement:
-    """Outcome of one durable old-run capacity settlement scan (R1)."""
+    """Outcome of one durable old-run capacity settlement scan."""
 
     scanned: int = 0
     released: int = 0
@@ -943,7 +943,7 @@ class PreemptionSettlement:
 
 @dataclass(frozen=True)
 class PreemptionReconciliation:
-    """Outcome of one D8 crash-recovery reconciliation pass (R1 + R2)."""
+    """Outcome of one crash-recovery reconciliation pass."""
 
     settlement: PreemptionSettlement = PreemptionSettlement()
     pending: tuple[str, ...] = ()
@@ -983,7 +983,7 @@ def _resolve_run_and_db(db: Any, run_id: str) -> tuple[Any, Any] | None:
 def _run_has_authentic_d8_receipt(
     run_db: Any, run_id: str, job: Job
 ) -> bool:
-    """True iff the run's terminal D8 outcome can be authenticated.
+    """True iff the run's terminal outcome can be authenticated.
 
     ``run_db`` **must** be the database that owns the run's execution evidence
     (events, attempts, execution-owner row, handoffs), never the owner DB: in
@@ -1076,14 +1076,14 @@ def settle_preemption_debts(
     now: datetime | None = None,
     page_size: int = 200,
 ) -> PreemptionSettlement:
-    """Settle terminal D8 runs' reserved capacity, independent of job state.
+    """Settle terminal runs' reserved capacity, independent of job state.
 
-    R1: :func:`reconcile_jobs` scans only RUNNING jobs, so a job that has
+    :func:`reconcile_jobs` scans only RUNNING jobs, so a job that has
     already been requeued (QUEUED / terminal / re-dispatched onto a newer run)
     can leave its *old* run's RESERVED rows charged forever.  This scan starts
     from durable owner-storage debt (:func:`ledger.list_reserved_debts`, paged
     so old debt is never starved) and releases only runs that are provably
-    terminal **and** whose D8 outcome can be authenticated (bound decision or
+    terminal **and** whose outcome can be authenticated (bound decision or
     the typed limit tail).  It is:
 
     * idempotent (a released row no longer appears; the UPDATE is
@@ -1120,7 +1120,7 @@ def settle_preemption_debts(
                 skipped += 1
                 continue
             if debt.job_id is None:
-                # No owning job means no way to authenticate the D8 receipt:
+                # No owning job means no way to authenticate the receipt:
                 # fail closed and retain the charge.
                 skipped += 1
                 continue
@@ -1174,8 +1174,8 @@ def reconcile_preemptions(
     page_size: int = 200,
     job_scan_limit: int = 100_000,
 ) -> PreemptionReconciliation:
-    """One D8 crash-recovery pass: settle settled debt and finish interrupted
-    preemption transactions (R1 + R2).
+    """One crash-recovery pass: settle settled debt and finish interrupted
+    preemption transactions.
 
     ``recover`` is an injected production entry point (in the scheduler this is
     :meth:`RunSupervisor.reconcile`, which owns the dead-owner/quiescence
@@ -1238,7 +1238,7 @@ def reconcile_jobs(
 ) -> list[ReconcileChange]:
     """Fix RUNNING jobs from their run's terminal status (section G).
 
-    Called by whoever owns the loop (M2-4b scheduler start and tick).
+    Called by whoever owns the loop (scheduler start and tick).
     ``COMPLETED`` -> SUCCEEDED; ``FAILED`` -> FAILED ``RUN_FAILED``;
     ``None`` (run not found) -> FAILED ``RUN_MISSING``; ``ORPHANED`` ->
     FAILED ``RUN_FAILED``; ``PENDING`` and ``RUNNING`` stay (recovery belongs to the
@@ -1263,10 +1263,10 @@ def reconcile_jobs(
         elif status in (RunStatus.FAILED, RunStatus.ORPHANED):
             to_state, failure = JobState.FAILED, RUN_FAILED
         elif status == RunStatus.PREEMPTED:
-            # Crash between run terminalization and job requeue (D8): finish
+            # Crash between run terminalization and job requeue: finish
             # the protocol from durable state.  The coordinator is
             # idempotent; a concurrent cancel still wins via CAS inside.
-            # H6: a run stopped for a deliberate redirect finishes as a
+            # A run stopped for a deliberate redirect finishes as a
             # redirect (REDIRECTED, no preemption budget), never as quota
             # preemption.
             from saberops.preemption import complete_preemption, redirect_requested
@@ -1542,7 +1542,7 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
     if report is not None:
         view["report"] = report
     view["steering_notes"] = [note.to_dict() for note in steering_notes(db, job.job_id)]
-    # F26: advisor route, calls and advice share one read-only projection with
+    # Advisor route, calls and advice share one read-only projection with
     # get_job, tail_job and catch_up, so every surface states the same record.
     try:
         from saberops.advisor import advisor_view_for_job
@@ -1595,7 +1595,7 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
 
     native = native_status(db, job)
     if native is not None:
-        # F16: a native child has no execution owner to ask; its liveness is
+        # A native child has no execution owner to ask; its liveness is
         # the heartbeat deadline plus the durable stop request.
         view["native"] = native
         if job.state == JobState.RUNNING:
@@ -1637,8 +1637,8 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
         # or TERMINATING): those are transient projections of a live process, so
         # they never raise owner attention on their own.  The pre-existing
         # attention path is the output-quiet stall event, which is durable; it
-        # surfaces only after that stall (and, with F14 enabled, after the one
-        # automatic nudge was spent).
+        # surfaces only after that stall (and, with the automatic nudge enabled,
+        # after that nudge was spent).
         or (
             supervision.health_state is HealthState.UNCERTAIN
             and supervision.manager_state == ManagerState.ATTENTION_REQUIRED
@@ -1659,7 +1659,7 @@ def job_dispatch_spec(job: Job) -> JobDispatchSpec:
     """Build the frozen job -> run mapping (section H, pure).
 
     This function does not call ``resolve_effective_run_config``:
-    freezing happens when M2-4b calls it at dispatch.
+    freezing happens when the scheduler calls it at dispatch.
     """
     from saberops.control_plane.capabilities import Capability
 
@@ -1682,7 +1682,7 @@ def job_dispatch_spec(job: Job) -> JobDispatchSpec:
         # never a switch.
         review_enabled=True,
         review_focus=job.requirements.review_focus,
-        # H20: the planner's consequential marker travels with the job so the
+        # The planner's consequential marker travels with the job so the
         # auto-accept pass can park the candidate for the owner.
         consequential=job.requirements.consequential,
     )

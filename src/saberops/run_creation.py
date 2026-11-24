@@ -56,7 +56,7 @@ TARGET_BRANCH_REQUIRED_MESSAGE: str = (
     "--repo <path> <branch>)."
 )
 
-#: F19 run kinds.  A scout is a read-only report run on the build route.
+#: Run kinds.  A scout is a read-only report run on the build route.
 SCOUT_RUN_KIND: str = "scout"
 BUILD_RUN_KIND: str = "build"
 
@@ -93,13 +93,13 @@ class RunRequest:
     gate_scratch_mode: GateScratchMode | str | None = None
     # Request-level run tuning (kept for compatibility; centralized here).
     routing_mode: str = "auto"
-    # F19: "build" (default) or "scout".  A scout run is read-only and ends
+    # "build" (default) or "scout".  A scout run is read-only and ends
     # with a report, never a candidate; roles are unchanged.
     kind: str = "build"
-    #: Planner-recorded judgement (H1): ``routine`` (default) or ``hard``.
+    #: Planner-recorded judgement: ``routine`` (default) or ``hard``.
     #: Never a provider, model, tier or route name.
     difficulty: str | None = None
-    #: Planner-recorded judgement (H20): the candidate this run produces is
+    #: Planner-recorded judgement: the candidate this run produces is
     #: consequential, so away and critical-only park it for the owner.
     consequential: bool = False
     manual_tier: Tier | str | None = None
@@ -260,7 +260,7 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
         settings=snapshot,
     )
     # The stored training/data-use bit is historical evidence and never
-    # restricts admission (H11).
+    # restricts admission.
     training_allowed = True
     gate_scratch_mode = resolve_effective_gate_scratch_mode(
         repo_path=request.repo_path, explicit_mode=request.gate_scratch_mode
@@ -288,7 +288,7 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
         # capability requirement is what makes admission pick a provider whose
         # CLI can enforce it.  Gate, review and publication do not apply to a
         # report, so they are frozen off instead of left to project policy.
-        # An unstated effort is the cheap default (H8, ADR-0035): a scout is
+        # An unstated effort is the cheap default (ADR-0035): a scout is
         # ``effort: low`` exactly like a job of the same kind.
         required_capabilities = tuple(
             sorted({*required_capabilities, Capability.READ_ONLY.value})

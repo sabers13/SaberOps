@@ -259,18 +259,18 @@ class TickResult:
     #: their reserved capacity was released and each was requeued once, or
     #: failed with ``DISPATCH_WINDOW_LOST`` if it already lost a dispatch.
     dispatch_window_repaired: tuple[str, ...] = ()
-    #: Typed GS-1 storage/SQLite infrastructure reason for this tick.
+    #: Typed storage/SQLite infrastructure reason for this tick.
     #: ``None`` when storage maintenance was not invoked or
     #: reported healthy.  A non-``None`` value is an INFRA park, never a code
     #: failure and never a pass.
     storage_infra_reason: str | None = None
-    #: Plan lanes newly submitted this tick, as ``"<plan_id>:<lane_id>"`` (P2).
+    #: Plan lanes newly submitted this tick, as ``"<plan_id>:<lane_id>"``.
     plan_lanes_submitted: tuple[str, ...] = ()
-    #: F17: jobs whose workers this tick stopped and parked (gate closed).
+    #: Jobs whose workers this tick stopped and parked (gate closed).
     paused_jobs: tuple[str, ...] = ()
-    #: F17: the pause reason id when ``reason == "paused"``.
+    #: The pause reason id when ``reason == "paused"``.
     pause_reason: str | None = None
-    #: F18: vendor CLIs whose version change is unverified; their providers
+    #: Vendor CLIs whose version change is unverified; their providers
     #: received no new work this tick.
     vendor_unverified: tuple[str, ...] = ()
 
@@ -738,7 +738,7 @@ def _default_run_launcher(
     from saberops.supervisor import RunSupervisor
 
     spec = job_dispatch_spec(job)
-    # D5: a dependant starts from the revision its accepted dependencies
+    # A dependant starts from the revision its accepted dependencies
     # landed, not the base recorded when it was submitted.
     run_base_sha = dispatch_base_sha(db, job)
     cand = decision.candidate
@@ -798,7 +798,7 @@ def _default_run_launcher(
     # when the dispatched job carries a verified preemption capsule, stage
     # the checkpoint plus capsule into the new run through its ordinary
     # worker-checkpoint channel.  The new run is still anchored at the
-    # original job base and still passes the full M2-4b posture / quota /
+    # original job base and still passes the full posture / quota /
     # readiness / lease / concurrency guard at (and inside) this dispatch;
     # a malformed resume stages nothing and the run launches fresh, with a
     # ``resume_skipped`` event recording the exact cause.  Admission,
@@ -811,7 +811,7 @@ def _default_run_launcher(
 
 
 def _scout_routes_for(jobs: Sequence[Job]) -> dict[str, str] | None:
-    """Per-job F27 scout route from each project's setting (never raises)."""
+    """Per-job scout route from each project's setting (never raises)."""
     from saberops.jobs.models import JobKind
     from saberops.scout_routing import load_scout_route
 
@@ -881,7 +881,7 @@ def scheduler_tick(
        - Invoke run_launcher
        - On error or lost lease: compensate by requeueing and releasing reservation.
 
-    ``launch_guard`` (GS-1 /) is consulted BEFORE any dispatch,
+    ``launch_guard`` is consulted BEFORE any dispatch,
     reservation or claim transition.  When it returns a typed reason the whole
     tick parks with zero side effects -- no job leaves QUEUED, no ledger row is
     booked and no launcher runs.  The fixed floor is the current guard; adaptive
@@ -904,7 +904,7 @@ def scheduler_tick(
     except (OSError, sqlite3.Error, ValueError):
         logging.getLogger(__name__).exception("desktop notification scan failed")
 
-    # F11: away mode is the only place the unattended decision policy acts.
+    # Away mode is the only place the unattended decision policy acts.
     # The mode document is read once per tick; a corrupt document fails the
     # whole tick closed instead of silently treating away as attended.
     away_active = False
@@ -930,7 +930,7 @@ def scheduler_tick(
 
     status_fn = run_status or (lambda r_id: _lookup_run_status(db, r_id))
     # One status snapshot per tick: the fail-closed RUNNING guard, the RUNNING
-    # reconciler and the D8 preemption reconciler all ask about the same runs,
+    # reconciler and the preemption reconciler all ask about the same runs,
     # so share a single memoized owner lookup instead of repeating the read
     # once per caller.
     status_cache: dict[str, RunStatus | None] = {}
@@ -1010,7 +1010,7 @@ def scheduler_tick(
     for running_job in running_snapshot:
         run_id = running_job.current_run_id
         if run_id and native_run_marker(db, run_id) is not None:
-            # F16: a native attempt is not a capacity reservation.  It is
+            # A native attempt is not a capacity reservation.  It is
             # cooperative work labelled quota unknown, so it must not park the
             # whole store as a legacy RUNNING job without a reservation.
             continue
@@ -1079,7 +1079,7 @@ def scheduler_tick(
     # The supervisor fences the owner generation and refuses to orphan while a
     # worker may still be alive. Worktrees and attempts are retained.
     #
-    # F17: the work gate is evaluated first.  When it is closed, every running
+    # The work gate is evaluated first.  When it is closed, every running
     # worker is stopped at a safe point (PREEMPTED + checkpoint + resume
     # capsule) before this reconciliation can mistake its dead owner for an
     # abandoned run.  A run the engine already parked is never reconciled
@@ -1124,7 +1124,7 @@ def scheduler_tick(
         logging.getLogger(__name__).exception("desktop notification scan failed")
     for ch in changes:
         if ch.to_state in (JobState.SUCCEEDED, JobState.FAILED) and away_active:
-            # F11: the durable three-consecutive-failure breaker folds every
+            # The durable three-consecutive-failure breaker folds every
             # finished away task, so a killed scheduler resumes with the same
             # count and a halt is never lost with the process.
             from saberops import away as away_module
@@ -1157,12 +1157,12 @@ def scheduler_tick(
     # 1b. crash recovery. This is the restart entry
     # point for two gaps that the RUNNING-only job reconciliation above cannot
     # see:
-    #   R1 -- a job already requeued (QUEUED / terminal / re-dispatched) still
-    #         owes its OLD run's RESERVED capacity; the debt is discovered from
-    #         durable owner storage, not from job state.
-    #   R2 -- a run interrupted between its durable D8 decision and
-    #         terminalization; the supervisor finishes it BEFORE generic
-    #         orphaning, only for a provably dead owner + quiescent worker.
+    # * a job already requeued (QUEUED / terminal / re-dispatched) still owes
+    #   its OLD run's RESERVED capacity; the debt is discovered from durable
+    #   owner storage, not from job state.
+    # * a run interrupted between its durable decision and terminalization;
+    #   the supervisor finishes it BEFORE generic orphaning, only for a
+    #   provably dead owner + quiescent worker.
     # It never decides a route, calls a provider, or frees capacity on an
     # unverified receipt, and it is fully idempotent across restarts.
     from saberops.jobs.service import reconcile_preemptions
@@ -1187,10 +1187,10 @@ def scheduler_tick(
     except Exception:
         preempt_recon = None
 
-    # 1c. Plan lanes (P2).  Submit every eligible lane of each active plan
+    # 1c. Plan lanes. Submit every eligible lane of each active plan
     # BEFORE the queue is read, so a lane that becomes ready in this tick can
     # also dispatch in it.  Submission goes through the single gated function
-    # in ``plan_runner`` (F17's pause seam); a no-planning-session or F17 pause
+    # in ``plan_runner`` (the pause seam); a no-planning-session or pause
     # submits nothing.  A malformed plan is a plan-level failure and must never
     # stop unrelated jobs, so the reconciler records it and returns.
     plan_lanes_submitted: tuple[str, ...] = ()
@@ -1207,7 +1207,7 @@ def scheduler_tick(
         for lane_id in result.submitted
     )
 
-    # 1d. Rendered plan state (P3).  The tick is the single writer of the
+    # 1d. Rendered plan state. The tick is the single writer of the
     # canonical ``STATE.md``: it rewrites atomically only when the projection
     # digest changed.  A broken plan or an unwritable state directory must
     # never stop unrelated jobs.
@@ -1218,10 +1218,10 @@ def scheduler_tick(
     except Exception:
         logging.getLogger(__name__).exception("plan state rendering failed")
 
-    # 1e. Plan-level notices (P5).  Complete, stalled and (away/critical-only)
+    # 1e. Plan-level notices. Complete, stalled and (away/critical-only)
     # waiting-for-owner notices are derived from the same projection as
     # STATE.md and keyed once, so repeated ticks never repeat a notice.  They
-    # run before the F17 pause return because a notice starts no work.
+    # run before the pause return because a notice starts no work.
     try:
         from saberops.plan_state import deliver_plan_notices
 
@@ -1229,7 +1229,7 @@ def scheduler_tick(
     except Exception:
         logging.getLogger(__name__).exception("plan notice delivery failed")
 
-    # F17: a closed gate starts nothing.  Running workers were already stopped
+    # A closed gate starts nothing.  Running workers were already stopped
     # and parked above; terminal reconciliation, capacity settlement and
     # notices keep running so the store stays truthful.  The tick keeps
     # returning "paused" so the continuous loop keeps evaluating the gate
@@ -1251,7 +1251,7 @@ def scheduler_tick(
     # 2. Collect scheduling inputs
     queued_jobs, _ = store.list_jobs_tolerant(db, state=JobState.QUEUED, limit=100_000)
     running_jobs, _ = store.list_jobs_tolerant(db, state=JobState.RUNNING, limit=100_000)
-    # F8: resolve dependency gating from durable records before any routing
+    # Resolve dependency gating from durable records before any routing
     # work.  A dependency is satisfied only by an accepted candidate, never by
     # "its run completed earlier".
     from saberops.jobs.dependencies import dependency_blockers
@@ -1280,8 +1280,8 @@ def scheduler_tick(
     except (sqlite3.OperationalError, sqlite3.DatabaseError):
         return TickResult(ran=False, reason="ledger_read_error")
 
-    # Derive real running counts per pool from running jobs (F3).
-    # Fail closed (R3-M1): per-pool occupancy is authoritative owner-DB state.
+    # Derive real running counts per pool from running jobs.
+    # Fail closed: per-pool occupancy is authoritative owner-DB state.
     # If the reservation scan for any RUNNING job cannot be read, the pool
     # occupancy is UNKNOWN, never zero — a partially counted map must never
     # reach admission (requires a free pool slot as well as a free
@@ -1306,7 +1306,7 @@ def scheduler_tick(
             p = str(r["pool_id"])
             running_counts[p] = running_counts.get(p, 0) + 1
 
-    # Snapshot readiness/executable availability per provider (F12)
+    # Snapshot readiness/executable availability per provider
     readiness_map: dict[str, Any] = {}
     if readiness_service is not None:
         try:
@@ -1323,7 +1323,7 @@ def scheduler_tick(
         except Exception:
             pass
 
-    # F18: a vendor CLI whose version change is unverified (or whose repair is
+    # A vendor CLI whose version change is unverified (or whose repair is
     # outstanding) receives no new work.  Detection runs here; the expensive
     # allowlisted help capture and the one smoke prompt run under the single
     # check claim in a detached process.
@@ -1374,7 +1374,7 @@ def scheduler_tick(
             vendor_unverified=vendor_unverified,
         )
 
-    # F11: the plan graph a park is measured against, built from durable queued
+    # The plan graph a park is measured against, built from durable queued
     # jobs only.  One parked task holds its dependents; independent work stays.
     away_scopes: tuple[Any, ...] = ()
     if away_active:
@@ -1423,7 +1423,7 @@ def scheduler_tick(
                 continue
 
         elif isinstance(dec, DispatchDecision):
-            # F1: one typed owner-mode decision before anything leaves QUEUED.
+            # One typed owner-mode decision before anything leaves QUEUED.
             # Dispatch follows the mode's ``auto_start``; a persisted grant can
             # only narrow it.  The check happens before the lease, the memory
             # reservation and the CAS, so a refused dispatch has zero side
@@ -1451,7 +1451,7 @@ def scheduler_tick(
             if away_active:
                 from saberops import away as away_module
 
-                # F11: the circuit breaker, the deterministic preflight and
+                # The circuit breaker, the deterministic preflight and
                 # every open question blocking this job.  A never-delegable or
                 # unhandled decision parks only this job; the loop continues so
                 # independent work still dispatches.
@@ -1552,7 +1552,7 @@ def scheduler_tick(
                     pass
                 return lost_during_tick()
 
-            # Step C: Idempotent reservation in ledger across ALL drawn pools (F2)
+            # Step C: Idempotent reservation in ledger across ALL drawn pools
             draws: list[PoolDraw] = list(dec.draws) if dec.draws else []
             if not draws:
                 target_pool_ids = (
@@ -1626,7 +1626,7 @@ def scheduler_tick(
                     memory_lease.handoff()
                 dispatched_count += 1
             except Exception:
-                # Launch failed; inspect durable run existence (F11)
+                # Launch failed; inspect durable run existence
                 run_exists = False
                 try:
                     if hasattr(db, "get_run") and db.get_run(run_id) is not None:
@@ -1674,13 +1674,13 @@ def scheduler_tick(
         except Exception:
             logging.getLogger(__name__).exception("away return summary delivery failed")
 
-    # 1e. Plan landing refresh (P6).  Deliberately after dispatch: a refresh
+    # 1e. Plan landing refresh. Deliberately after dispatch: a refresh
     # runs a gate and an independent review, and it must never delay this
     # tick's dispatch or its newly unblocked lanes.  At most one stale sibling
     # is refreshed per tick, in landing order (wave, then lane id); a failed
     # refresh is recorded on the lane and shown by the next render, so nothing
-    # stalls silently.  The pass refuses to start while the work gate is closed
-    # (F17), so closing the planning CLI pauses refresh spending too.
+    # stalls silently.  The pass refuses to start while the work gate is
+    # closed, so closing the planning CLI pauses refresh spending too.
     try:
         from saberops.plan_runner import refresh_stale_plan_candidates
 
@@ -1692,7 +1692,7 @@ def scheduler_tick(
     except Exception:
         logging.getLogger(__name__).exception("plan landing refresh failed")
 
-    # 1f. F15 auto-accept.  Deliberately after dispatch and the landing refresh:
+    # 1f. Auto-accept. Deliberately after dispatch and the landing refresh:
     # accepting a local candidate runs the post-integration gate, so it must
     # never delay this tick's dispatch.  At most one candidate is accepted per
     # tick.  The pass refuses unless the effective owner mode is away or
@@ -1727,7 +1727,7 @@ def scheduler_tick(
 
 
 def _storage_maintenance_interval() -> timedelta:
-    """Cadence between periodic storage maintenance passes (GS-1)."""
+    """Cadence between periodic storage maintenance passes."""
     from saberops.storage_cleanup import MAINTENANCE_INTERVAL
 
     return MAINTENANCE_INTERVAL

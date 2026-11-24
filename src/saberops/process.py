@@ -59,7 +59,7 @@ class ProcessResult:
     # positional field order of the established fields does not move.
     output_incomplete: bool = False
     # Typed reason when the engine deliberately stopped the process tree before
-    # a natural exit.  Today the only such cut is the N9 idle-tree cutoff; an
+    # a natural exit. Today the only such cut is the idle-tree cutoff; an
     # adapter or orchestrator records it on the attempt so the durable record
     # does not read like a network failure.  ``None`` means no engine cut.
     termination_reason: str | None = None
@@ -1281,7 +1281,7 @@ def _close_pipe_stream_after_unconfirmed_drain(stream: IO[str]) -> None:
     later walks down to it is an idempotent no-op.  Closing only the numeric
     descriptor (``os.close``) left the surviving wrapper to close an
     already-closed descriptor at interpreter shutdown and printed two "Bad
-    file descriptor" tracebacks into the worker transcript (D3-remainder).
+    file descriptor" tracebacks into the worker transcript.
     """
     raw = getattr(getattr(stream, "buffer", None), "raw", None)
     if raw is not None:
@@ -1887,7 +1887,7 @@ def run_process(
                             # The tree is demonstrably active but the attempt
                             # has produced no output for the whole cutoff.  Cut
                             # it before the hard timeout so the repair/retry
-                            # path runs instead of burning the full budget (N9).
+                            # path runs instead of burning the full budget.
                             monitor_stall_terminated = True
                             if _monitor is not None:
                                 _monitor.mark_terminating()
@@ -1991,7 +1991,7 @@ def run_process(
                     # makes its finalizer a no-op; closing the raw fd alone left
                     # the wrapper to close an already-closed descriptor and
                     # Python 3.14 printed 12 "Bad file descriptor" tracebacks at
-                    # worker finalization (D3).
+                    # worker finalization.
                     try:
                         stream.close()
                     except Exception:

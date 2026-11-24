@@ -89,7 +89,7 @@ class ProjectSettings:
     data_policy: DataPolicy | None = None
     accept_target_branch: str | None = None
     gate_enabled: bool = True
-    #: F27: ``cheap`` (default), ``build``, or one exact ``provider/model`` on
+    #: ``cheap`` (default), ``build``, or one exact ``provider/model`` on
     #: the build route.  ``None`` means the documented cheap default.
     scout_route: str | None = None
 
@@ -149,7 +149,7 @@ def _coerce_branch(value: object, source: str) -> str:
 
 
 def _coerce_scout_route(value: object, source: str) -> str:
-    """Validate the F27 scout-route setting (``cheap``, ``build`` or route id)."""
+    """Validate the scout-route setting (``cheap``, ``build`` or route id)."""
     from saberops.scout_routing import validate_scout_route
 
     try:

@@ -1,12 +1,12 @@
-"""Plan registry types and fail-closed validation (M2-2, control-plane config v2).
+"""Plan registry types and fail-closed validation (control-plane config v2).
 
 This module owns the *data* side of the capacity model: accounts, pool
 plans (windows, overage, concurrency, member multipliers), billing
 postures and time-of-day reserves.  It deliberately wires nothing into
-admission (M2-4b) or quota enforcement (I-003); it only parses,
+admission or quota enforcement; it only parses,
 validates and carries the data.
 
-Selector grammar (shared with M2-1's matcher)::
+Selector grammar (shared with the capacity matcher)::
 
     provider                e.g. ``codex``
     provider/model          e.g. ``codex/gpt-5.6-terra``

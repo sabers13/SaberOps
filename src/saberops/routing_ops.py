@@ -125,7 +125,7 @@ class RoutingOption:
 
 def _adapter_for(binding: Any, registry: AdapterRegistry) -> Any | None:
     if binding.backend is BindingKind.DIRECT_API:
-        # Direct-API execution was removed (H17): no adapter can serve it.
+        # Direct-API execution has no adapter.
         return None
     return registry.get(binding.provider)
 

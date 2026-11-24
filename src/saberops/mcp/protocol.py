@@ -64,7 +64,7 @@ __all__ = [
     "McpServer",
 ]
 
-#: Server identity advertised in ``initialize`` (Step 014).
+#: Server identity advertised in ``initialize``.
 SERVER_NAME = "saberops"
 SERVER_VERSION = "0.6.0"
 
@@ -177,7 +177,7 @@ class McpServer:
         return on
 
     def _note_presence(self) -> None:
-        """Arm F17 presence tracking once a session really holds the lease."""
+        """Arm presence tracking once a session really holds the lease."""
         if not self._context.lease.writer:
             return
         try:
@@ -482,7 +482,7 @@ class McpServer:
                 if store_needs_introduction(self._context.db_path)
                 else ""
             )
-            # A paused store must never be silent (D2): the returning session
+            # A paused store must never be silent: the returning session
             # would otherwise submit a job, wait out its timeout, and tell the
             # owner that nothing needs doing.  The gate facts are stable facts
             # about the store, not this reader's own presence.
@@ -499,7 +499,7 @@ class McpServer:
                 )
             else:
                 gate_line = f" Work gate: {gate.get('label')}."
-            # The turn-on reply names the ``preflight`` MCP tool only (D14).
+            # The turn-on reply names the ``preflight`` MCP tool only.
             # Suggesting a shell command here made hosts ask a second approval
             # dialog and then label the turn "1 failed" when a fresh store's
             # preflight exits non-zero by design (it has setup FAILs to report).

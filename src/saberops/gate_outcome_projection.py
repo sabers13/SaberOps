@@ -1,4 +1,4 @@
-"""Pure gate-outcome projection (early Step 009 slice, GS-2).
+"""Pure gate-outcome projection.
 
 Deterministic, side-effect-free projection from developer-gate evidence
 (words from ``scripts/gate_tools.py::evaluate``: ``PASS`` / ``FLAKY_PASS`` /

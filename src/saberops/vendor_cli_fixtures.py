@@ -1,6 +1,6 @@
 """Dated, redacted real vendor-CLI fixtures, drift detection and owner capture.
 
-HV-1 (Step 023).  This is fixture tooling only.  It never imports a vendor SDK,
+This is fixture tooling only. It never imports a vendor SDK,
 never sends a model prompt, never reads credentials, and never contacts a
 vendor on its own: the only network-touching path is the owner-run ``capture``
 subcommand, which goes through the EXISTING account readers.

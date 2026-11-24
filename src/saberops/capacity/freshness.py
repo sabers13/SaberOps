@@ -1,4 +1,4 @@
-"""Freshness computed at read time (M2-1 F)."""
+"""Freshness computed at read time."""
 
 from __future__ import annotations
 

@@ -322,7 +322,8 @@ GITHUB_DENY: tuple[str, ...] = (".github/**",)
 #: repository-relative patterns.  ``GIT_INTERNAL_DENY`` denies the whole
 #: ``.git`` directory, which also forbids the ordinary commit/checkout
 #: writes a sandboxed worker legitimately performs.  These narrower
-#: patterns isolate exactly the repository control surface M4 protects --
+#: patterns isolate exactly the repository control surface the isolation layer
+#: protects --
 #: the local config and the hook directory -- while leaving refs,
 #: objects, the index and logs inside the granted scope.  They are
 #: deliberately directory/file shaped so the bwrap deny mask can overlay

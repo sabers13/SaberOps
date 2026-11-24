@@ -1,4 +1,4 @@
-"""ULID job ids (M2-3 section B): in-house, no dependency."""
+"""ULID job ids: in-house, no dependency."""
 
 from __future__ import annotations
 

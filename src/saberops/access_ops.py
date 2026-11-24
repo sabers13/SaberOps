@@ -1,18 +1,16 @@
 """Owner model-access connection operations (service layer).
 
 Single service-layer authority for the ``orch access`` commands, and the
-seam the future MCP server will call.  Every function here is the ONE
-service-layer function for its operation; the CLI is a thin wrapper that
-only parses arguments and renders output.
+seam the MCP server calls.  Every function here is the ONE service-layer
+function for its operation; the CLI is a thin wrapper that only parses
+arguments and renders output.
 
-All behavior mirrors the removed ``/access`` web routes exactly (see
-``git show orch/T-003-config-pinning:src/saberops/web.py``): owner
-authority, validation, fail-closed persistence, and the no-inference
-rule for test/discover (only the declared non-inference status command
-or an unauthenticated reachability probe runs; credentials are never
-read, let alone transmitted).  ``verify_access_model`` is the explicit
-owner-authorized bounded model check the ``/access/verify-model`` route
-performed -- it never runs implicitly.
+Every operation keeps the owner access rules: owner authority, validation,
+fail-closed persistence, and the no-inference rule for test/discover (only
+the declared non-inference status command or an unauthenticated reachability
+probe runs; credentials are never read, let alone transmitted).
+``verify_access_model`` is the explicit owner-authorized bounded model
+check; it never runs implicitly.
 
 Discovery execution itself stays housed in :mod:`saberops.web`
 (:func:`saberops.web._discover_connection`), imported locally to keep
@@ -200,12 +198,11 @@ def test_access_connection(
 ) -> dict[str, Any]:
     """Verify one connection and persist the classified result.
 
-    Same authority as the removed ``POST /access/test`` route:
-    account-backed (and supported API) connections verify through the
+    Account-backed (and supported API) connections verify through the
     canonical :class:`ReadinessService` refresh over the exact
     already-loaded connection -- only the declared non-inference status
     command runs, no model call occurs, and ``UNKNOWN`` stays
-    ``UNKNOWN``.  A stored direct-API row (removed, H17) has no
+    ``UNKNOWN``. A stored direct-API row has no
     transport and is refused; the stored credential value is never read,
     let alone sent.
     """

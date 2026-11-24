@@ -127,7 +127,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-#: F16 native-worker tools that mutate durable evidence when the owner flag is
+#: Native-worker tools that mutate durable evidence when the owner flag is
 #: on (``controls`` posts the stop once the heartbeat deadline has passed).
 #: They are kept apart from :data:`MUTATING_TOOLS` because they are only
 #: registered while the flag is enabled.
@@ -203,7 +203,7 @@ _ANSWER_AUTHORITIES = ["OWNER", "PLAN"]
 _ANSWER_ROLES = ["OWNER", "PLAN"]
 _OWNER_MODE_VALUES = ["ask-me", "critical-only", "away"]
 
-#: A cross-CLI proxy's self-asserted provenance label (D13).  The narrow
+#: A cross-CLI proxy's self-asserted provenance label. The narrow
 #: create-only exception below accepts only this shape, never a free-form
 #: caller string, so it cannot become a general write grant for read-only
 #: clients.
@@ -340,7 +340,7 @@ class ToolRegistry:
     def _proxy_submit_owner(self, name: str, arguments: Mapping[str, Any]) -> str | None:
         """Return the live planning session allowed to accept a proxy submit.
 
-        D13: a host CLI may give each custom-agent child its own MCP server
+        A host CLI may give each custom-agent child its own MCP server
         instance, so the child is read-only even though the parent session is
         still planning.  The exception is deliberately narrow: only
         ``submit_job``, only for a ``caller_id`` shaped like ``proxy:<name>``,
@@ -550,7 +550,7 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
 
 
 def _submit_plan(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Activate a repository ``PLAN.md`` and submit its ready lanes (P2).
+    """Activate a repository ``PLAN.md`` and submit its ready lanes.
 
     Path-only: the handler reads the file from inside the caller's repository,
     never raw bytes over the wire, and returns a parsed summary.  Each ready
@@ -701,7 +701,7 @@ def _job_guidance(job: Any, db: Any | None = None) -> str | None:
 
 
 def _latest_waiting_details(db: Any, job: Any) -> dict[str, Any]:
-    """The most recent durable waiting details for a job (F8/F9F evidence)."""
+    """The most recent durable waiting details for a job (F9F evidence)."""
     if db is None:
         return {}
     try:
@@ -779,7 +779,7 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
         "result": result,
         "usage": result["usage"],
         "guidance": _job_guidance(job, db),
-        # D2: a paused store is a fact about the job's progress, so every
+        # A paused store is a fact about the job's progress, so every
         # reader sees why nothing moves and the one call that resumes it --
         # before it waits out a timeout and reports no owner action.
         "pause": gate_facts(db=db),
@@ -787,7 +787,7 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
 
 
 def _promote_scout(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Start a build job carrying a scout report as its starting context (F19)."""
+    """Start a build job carrying a scout report as its starting context."""
     from saberops.jobs.service import (
         IdempotencyConflictError,
         JobNotFoundError,
@@ -834,7 +834,7 @@ def _promote_scout(context: ServerContext, arguments: Mapping[str, Any]) -> dict
 
 
 def _tail_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Read a running job's live progress without touching it (Wave 3 F3).
+    """Read a running job's live progress without touching it.
 
     Structural progress and terminal output are the incremental tail; the
     lifecycle, candidate, gate, review and acceptance facts are the same
@@ -861,7 +861,7 @@ def _tail_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "activity": view["activity"],
         "reason": view["reason"],
         "run_id": run_id,
-        # F26: advice is visible while the job runs, from the same record
+        # Advice is visible while the job runs, from the same record
         # catch_up and get_job read.
         "advisor": view.get("advisor"),
     }
@@ -956,7 +956,7 @@ def _catch_up_review(
 def _catch_up_switch(report: Mapping[str, Any]) -> dict[str, Any] | None:
     """The latest handoff from one attempt to its replacement, for ``catch_up``.
 
-    F4: when a subscription runs out, the run continues from the interrupted
+    When a subscription runs out, the run continues from the interrupted
     attempt's checkpoint on a different binding.  That switch is durable
     evidence (attempt rows, worker checkpoints, dispatch evidence, workspace
     observation); this adapter only selects it from the run report.
@@ -1126,7 +1126,7 @@ def _catch_up_next_action(
             "detail": f"Candidate {projection.candidate_sha[:8]} is already accepted.",
             "command": None,
         }
-    # H6 (ADR-0016): a note that never reached a worker blocks acceptance, so
+    # A note that never reached a worker blocks acceptance, so
     # the one next action names both ways out instead of an accept the engine
     # will refuse.  A running job may also redirect to deliver it now.
     from saberops.steering import note_resolution_view
@@ -1256,7 +1256,7 @@ def _catch_up_return_summary(
     section reuses the projection behind ``STATE.md``.  A killed scheduler and a
     fresh CLI session therefore read exactly the same records, and closing the
     planner never loses the plan's next action.  When the caller passes the
-    job's advisor projection, the same record is attached here too (F26), so the
+    job's advisor projection, the same record is attached here too, so the
     return summary never disagrees with `catch_up`.
     """
     try:
@@ -1276,7 +1276,7 @@ def _catch_up_return_summary(
 def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     """Read-only "catch me up" lookup: saved request, candidate and next action.
 
-    Reuses :func:`_job_result` (C5) so the owner action has exactly one
+    Reuses :func:`_job_result` so the owner action has exactly one
     projection.  Nothing is written: no job/run/event/question mutation, no
     notice, and no planning lease.  A session that does not hold the writer
     lease can call it.
@@ -1359,7 +1359,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "check": check,
         "review": review,
         "switch": switch,
-        # F17: what the gate is holding, so a returning session sees the pause
+        # What the gate is holding, so a returning session sees the pause
         # and the one call that resumes it before it assumes work is running.
         # Stable facts only: the reader's own presence would make two sessions
         # disagree about the same store (ADR-0011 §5); `get_pause` has it.
@@ -1367,7 +1367,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "open_questions": questions,
         "self_answered": _catch_up_self_answered(context, job),
         "steering_notes": _catch_up_steering_notes(db, job),
-        # F26: advisor route, calls and advice for this job.
+        # Advisor route, calls and advice for this job.
         "advisor": view.get("advisor"),
         "return_summary": _catch_up_return_summary(
             context, advisor=view.get("advisor")
@@ -1395,7 +1395,7 @@ def _wait_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
             return {**result, "timed_out": False, "outcome": "final"}
         pause = result.get("pause") or {}
         if pause.get("closed"):
-            # D2: a closed work gate means this job cannot move, however long
+            # A closed work gate means this job cannot move, however long
             # the caller waits.  Report the pause and how to resume instead of
             # a timeout that reads as "no owner action is pending".
             since = pause.get("since")
@@ -1415,7 +1415,7 @@ def _wait_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
                 },
             }
         if job.get("waiting_reason") == "QUOTA_EVIDENCE_REQUIRED":
-            # D9: waiting cannot clear this on its own; the owner must record
+            # Waiting cannot clear this on its own; the owner must record
             # the quota evidence (the guidance names the exact command).
             return {
                 **result,
@@ -1540,7 +1540,7 @@ def _note_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
 
 
 def _redirect_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Stop the running attempt, keep its work and continue with the note (H6)."""
+    """Stop the running attempt, keep its work and continue with the note."""
     from saberops.jobs.service import JobNotFoundError, redirect_job
 
     job_id = _require_text(arguments, "job_id", what="job_id")
@@ -1839,7 +1839,7 @@ def _refresh_candidate(context: ServerContext, arguments: Mapping[str, Any]) -> 
 
 
 def _resume_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Resume one failed job: from scratch or from its saved candidate (H7)."""
+    """Resume one failed job: from scratch or from its saved candidate."""
     from saberops.service import OrchestratorService, RunOperationError
 
     job_id = _require_text(arguments, "job_id", what="job_id")
@@ -1890,7 +1890,7 @@ def _list_proposals(context: ServerContext, arguments: Mapping[str, Any]) -> dic
 
 
 def _get_mode(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Read the effective owner mode; never changes it (F1)."""
+    """Read the effective owner mode; never changes it."""
     from saberops.owner_mode import OwnerModeError, mode_view
 
     try:
@@ -1901,7 +1901,7 @@ def _get_mode(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
 
 
 def _get_pause(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Read the F17 work gate: closed, why, what is paused, how to resume."""
+    """Read the work gate: closed, why, what is paused, how to resume."""
     from saberops.runtime_gate import gate_view
 
     db = context.database(read_only=True)
@@ -2124,7 +2124,7 @@ def _ask_advisor(context: ServerContext, arguments: Mapping[str, Any]) -> dict[s
 def _propose_mode_change(
     context: ServerContext, arguments: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Raise an owner question for a mode change; never flips the mode (F1)."""
+    """Raise an owner question for a mode change; never flips the mode."""
     from saberops.owner_mode import (
         OWNER_MODE_ORDER,
         OwnerMode,
@@ -2327,7 +2327,7 @@ def _native_error(exc: Exception) -> ToolError:
 
 
 def _native_claim(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Claim a queued job for a native child of the orchestrating CLI (F16)."""
+    """Claim a queued job for a native child of the orchestrating CLI."""
     from saberops.native_workers import claim_native_job
 
     db = context.database(read_only=False)
@@ -2355,7 +2355,7 @@ def _native_claim(context: ServerContext, arguments: Mapping[str, Any]) -> dict[
 
 
 def _native_heartbeat(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Record native liveness and deliver steering/stop state (F16)."""
+    """Record native liveness and deliver steering/stop state."""
     from saberops.native_workers import native_heartbeat
 
     db = context.database(read_only=False)
@@ -2374,7 +2374,7 @@ def _native_heartbeat(context: ServerContext, arguments: Mapping[str, Any]) -> d
 
 
 def _native_controls(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Read native control state; posts a stop when the deadline passed (F16)."""
+    """Read native control state; posts a stop when the deadline passed."""
     from saberops.native_workers import native_controls
 
     db = context.database(read_only=False)
@@ -2389,7 +2389,7 @@ def _native_controls(context: ServerContext, arguments: Mapping[str, Any]) -> di
 
 
 def _record_native_attempt(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Verify, gate and independently review one native report (F16)."""
+    """Verify, gate and independently review one native report."""
     from saberops.native_workers import record_native_attempt
 
     db = context.database(read_only=False)
@@ -2865,7 +2865,7 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     )
     from saberops.advisor import advisor_route_or_none
 
-    # F26 (ADR-0034): the advisor is optional and off by default.  "Off"
+    # The advisor is optional and off by default. "Off"
     # removes the tool entirely for this project session rather than offering
     # a call that can only refuse.
     if context.repo is not None and advisor_route_or_none(context.repo) is not None:
@@ -2888,7 +2888,7 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     from saberops.native_workers import NATIVE_TOOL_NAMES, native_enabled
 
     if native_enabled():
-        # F16: the hybrid native-worker surface exists only while the owner
+        # The hybrid native-worker surface exists only while the owner
         # flag is on.  Turning it off removes the tools entirely.
         register(
             "native_claim",

@@ -2,9 +2,9 @@
 
 Normalization only: one raw observation becomes a remaining percentage.
 Routing policy lives in ``control_plane/quota_policy.py`` and
-``capacity/``. The legacy provider-keyed NORMAL/DEMOTED/BLOCKED policy
-(25 % threshold) was deleted in M2-4a; ``orch quota set|list|enable``
-are owner commands mapped onto the capacity ledger.
+``capacity/``.  There is no fixed provider-keyed NORMAL/DEMOTED/BLOCKED
+threshold; ``orch quota set|list|enable`` are owner commands mapped onto the
+capacity ledger.
 """
 
 from __future__ import annotations

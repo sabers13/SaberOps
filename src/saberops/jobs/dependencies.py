@@ -1,4 +1,4 @@
-"""F8 job dependencies: the graph, its validation, and the acceptance gate.
+"""Job dependencies: the graph, its validation, and the acceptance gate.
 
 A job may name other jobs it must not start before (``Job.depends_on``).  The
 scheduler starts a dependant only after **every** dependency is *accepted*:
@@ -182,7 +182,7 @@ def dispatch_base_sha(db: Any, job: Job) -> str:
     dependency is accepted, so the newest acceptance is the revision that
     contains the work the dependant was written against; anchoring on the
     submit-time base made the worker rebuild the old tree and fail with
-    ``base_revision_mismatch`` (D5).
+    ``base_revision_mismatch``.
     """
     if not job.depends_on:
         return job.base_sha
@@ -219,7 +219,7 @@ def _run_databases(db: Any, run_id: str) -> list[Any]:
 def job_is_accepted(db: Any, job: Job) -> bool:
     """True iff the job succeeded and one of its runs was accepted.
 
-    A scout job (F19) has no candidate to accept: its deliverable is a report,
+    A scout job has no candidate to accept: its deliverable is a report,
     and the engine considers the job complete when the report exists.  A
     succeeded scout therefore satisfies a dependency directly.
     """

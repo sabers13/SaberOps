@@ -1,4 +1,4 @@
-"""Append-only event ledger and the versioned read snapshot (M3).
+"""Append-only event ledger and the versioned read snapshot.
 
 Two client-synchronisation primitives:
 

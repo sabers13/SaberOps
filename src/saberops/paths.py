@@ -148,7 +148,7 @@ def get_runtime_gate_path() -> Path:
 
 
 def get_attendance_dir() -> Path:
-    """Return the directory holding attended-terminal presence records (F24)."""
+    """Return the directory holding attended-terminal presence records."""
     return saberops_state_dir() / "attendance"
 
 

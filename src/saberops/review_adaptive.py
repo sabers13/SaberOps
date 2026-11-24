@@ -69,9 +69,8 @@ class ReviewDecision:
         """Reconstruct a decision, accepting the pre-1.1 persisted shape.
 
         A legacy decision that recorded a skip for any reason other than the
-        owner switch is rejected (:class:`ReviewPolicyError`) so its reader
-        falls back to the conservative review-required decision instead of
-        honouring a classifier skip that no longer exists.
+        owner switch is rejected (:class:`ReviewPolicyError`), so its reader
+        falls back to the conservative review-required decision.
         """
         try:
             data = json.loads(raw)

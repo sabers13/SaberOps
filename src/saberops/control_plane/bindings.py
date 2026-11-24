@@ -988,9 +988,9 @@ def resolve_execution_binding(
     except KeyError as exc:
         raise BindingResolutionError("POOL_UNKNOWN") from exc
     if binding.backend is BindingKind.DIRECT_API:
-        # The direct-API worker was removed (H17).  A pre-upgrade binding that
-        # names it stays readable evidence but has no executable transport, so
-        # resolution fails closed instead of silently falling back to a CLI.
+        # A direct-API binding stays readable evidence but has no executable
+        # transport, so resolution fails closed instead of silently falling
+        # back to a CLI.
         raise BindingResolutionError("UNSUPPORTED_BACKEND")
     if adapter is None:
         raise BindingResolutionError("NO_ADAPTER")

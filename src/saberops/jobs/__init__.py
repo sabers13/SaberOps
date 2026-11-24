@@ -1,8 +1,8 @@
-"""Durable job queue (M2-3): jobs package, state machine, service surface.
+"""Durable job queue: jobs package, state machine, service surface.
 
-Nothing in this lane dispatches. The scheduler (M2-4b) will call
-``job_dispatch_spec``, ``mark_dispatched``, ``reconcile_jobs`` and
-``requeue``. Until then submitted jobs stay QUEUED.
+Nothing here dispatches. The scheduler calls ``job_dispatch_spec``,
+``mark_dispatched``, ``reconcile_jobs`` and ``requeue``; until it does, a
+submitted job stays QUEUED.
 """
 
 from saberops.jobs.models import (

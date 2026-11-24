@@ -14,7 +14,7 @@ States:
                    A productive AMBIGUOUS_BUSY period resets the
                    stall-confirmation anchor.  When the tree stays busy but
                    produces no output for the tree-activity cutoff, the attempt
-                   is stopped early so the repair/retry path can run (N9).
+                   is stopped early so the repair/retry path can run.
     STALLED      — whole-tree inactivity (no output, no CPU/I/O/topology
                    activity) sustained from the LAST meaningful activity for
                    the full stall_confirmation window, with evidence complete
@@ -56,7 +56,7 @@ MONITOR_SAMPLE_INTERVAL_SECONDS: float = 5.0
 #: inactivity threshold and half the 1200 s hard worker timeout — tolerates a
 #: long build or test run with no stdout while still returning the attempt to
 #: the repair/retry path with time to spare.  Any output at all resets the
-#: clock, so a working worker is never cut (N9).
+#: clock, so a working worker is never cut.
 TREE_ACTIVITY_WITHOUT_OUTPUT_CUTOFF_SECONDS: float = 600.0
 
 
@@ -335,10 +335,8 @@ class WorkerMonitor:
         self._prev_snap: ProcessGroupSnapshot | None = None
         self._peak_rss_bytes: int = 0
 
-    # Backwards-compatible alias: historically the anchor was called
-    # ``_quiet_since`` (first-quiet timestamp).  It is now the
-    # last-meaningful-activity timestamp; the alias keeps external pokes
-    # (tests, tooling) working against the same anchor.
+    # Backwards-compatible alias for the last-meaningful-activity anchor,
+    # kept so tests and tooling can poke the same value.
     @property
     def _quiet_since(self) -> float | None:
         return self._last_activity
@@ -369,7 +367,7 @@ class WorkerMonitor:
 
     @property
     def peak_rss_bytes(self) -> int:
-        """Peak process-tree RSS observed across samples (for C1/C2)."""
+        """Peak process-tree RSS observed across samples (for the capacity read model)."""
         return self._peak_rss_bytes
 
     @property
@@ -529,7 +527,7 @@ class WorkerMonitor:
         process tree is demonstrably doing CPU/I/O work, so this is not a
         whole-tree stall, but the attempt has produced no output for the full
         cutoff.  Any output resets the clock, so a worker that is producing
-        output is never cut (N9).  Incomplete evidence never authorises a
+        output is never cut. Incomplete evidence never authorises a
         destructive decision.
         """
         if self._state is not MonitorState.AMBIGUOUS_BUSY:

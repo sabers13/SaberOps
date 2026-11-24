@@ -104,9 +104,8 @@ SABEROPS_OWNED_ENV_ALLOWLIST: tuple[str, ...] = (
 #:   (``workers/opencode.py``, ``workers/antigravity.py``);
 #: * ``_ORCH_`` -- the Copilot MiniMax sentinel (``workers/copilot.py``).
 #:
-#: The removed gateway seam formerly emitted ``ORCH_GATEWAY_*`` control
-#: names under the ``ORCH_`` prefix and a loopback bridge sentinel under
-#: ``_ORCH_``; those names are now denied for every harness (see
+#: The gateway control names ``ORCH_GATEWAY_*`` and the loopback bridge
+#: sentinel under ``_ORCH_`` are denied for every harness (see
 #: :func:`_overlay_denied`), so stale values can never reach a child.
 #:
 #: There is deliberately no ``OPENCODE_`` prefix entry: only the three

@@ -657,7 +657,7 @@ def agent_document(slug: str, target: str) -> str:
 
 
 #: The native worker subagent `orch connect --skill` installs beside the skill
-#: (F16).  It runs on the host's own vendor and cooperates through the SaberOps
+#: It runs on the host's own vendor and cooperates through the SaberOps
 #: MCP server; SaberOps verifies its evidence and never trusts its process.
 WORKER_NAME = "saberops-worker"
 
@@ -863,7 +863,7 @@ def _write_worker_file(
 
 
 def install_worker(slug: str, *, home: Path | None = None, dry_run: bool = False) -> ConnectResult:
-    """Install the native worker definition this host CLI supports (F16)."""
+    """Install the native worker definition this host CLI supports."""
     agent = agent_by_slug(slug)
     if agent is None:
         return ConnectResult(slug, False, f"Unknown agent {slug!r}.")
@@ -1267,7 +1267,7 @@ def _skill_result(
 def install_skill(
     slug: str, *, home: Path | None = None, dry_run: bool = False
 ) -> ConnectResult:
-    """Install the four SaberOps skills plus the native worker definition (F16).
+    """Install the four SaberOps skills plus the native worker definition.
 
     Every file carries an ownership marker, so a file SaberOps did not write
     is never overwritten or later removed.

@@ -1,4 +1,4 @@
-"""The rendered plan state (``STATE.md``) for Phase 1 lane P3.
+"""The rendered plan state (``STATE.md``).
 
 What this module is
 -------------------
@@ -15,7 +15,7 @@ Every value comes from durable records: the immutable plan revision, the
 ``plans``/``plan_lanes`` rows, jobs, runs, attempts, checks, reviews and the
 ``run_accepted`` events.  Nothing here invents progress, and nothing here acts
 on the view.  Acceptance, dispatch and repair stay exactly where they are.
-P6's landing order (wave, then lane id), ``stale`` marking and the
+The landing order (wave, then lane id), ``stale`` marking and the
 ``refresh-failed`` outcome are derived the same way, from the lane's current run
 and the ``plan_lane_refreshed`` / ``plan_lane_refresh_failed`` events.
 
@@ -198,7 +198,7 @@ class PlanState:
     held: tuple[str, ...]
     landing: tuple[str, ...]
     next_action: str
-    #: Why F1's effective permission currently refuses automatic starts, when
+    #: Why the effective permission currently refuses automatic starts, when
     #: it does.  ``None`` means a ready lane may start on the next tick.
     advance_refusal: str | None = None
 
@@ -383,7 +383,7 @@ def _refine_state(
         if run is not None and run.base_commit != target_head:
             state = "refresh-failed" if refresh_error is not None else "stale"
     if view.superseded_by:
-        # P4: a changed lane never silently inherits its old result.
+        # A changed lane never silently inherits its old result.
         if state in {"candidate", "stale", "refresh-failed"}:
             return "needs-decision"
         if state in {"queued", "running", "needs-attention"}:
@@ -602,8 +602,8 @@ def project_plan_state(
 def _advance_refusal(plan: PlanRecord, db: Any) -> str | None:
     """One visible reason a ready lane is not starting right now.
 
-    The same two gates the reconciler consults, in the same order: F17's work
-    gate (a closed gate starts nothing in any mode) and F1's typed owner-mode
+    The same two gates the reconciler consults, in the same order: the work
+    gate (a closed gate starts nothing in any mode) and the typed owner-mode
     decision.  Read-only, so the file and the reconciler cannot disagree.
     """
     if not plan.auto_advance:
@@ -858,7 +858,7 @@ def render_active_plan_states(
 
 
 # ---------------------------------------------------------------------------
-# Plan-level notices and the return-summary section (P5)
+# Plan-level notices and the return-summary section
 # ---------------------------------------------------------------------------
 
 #: A lane in one of these states needs nothing more from anybody.
@@ -890,7 +890,7 @@ def _active_plans_readonly(db: Any) -> tuple[PlanRecord, ...]:
 def plan_notice_messages(
     state: PlanState, *, mode: Any = None
 ) -> tuple[tuple[str, str, str], ...]:
-    """Plan-level notices derived only from one projection (P5).
+    """Plan-level notices derived only from one projection.
 
     Three families, each keyed once so repeated ticks never repeat a notice:
 
@@ -899,7 +899,7 @@ def plan_notice_messages(
       body names the exact next owner action.
     * ``plan:<id>:needs-decision:<lane>`` -- in ``away`` or ``critical-only``
       the plan has no moving lane left and a candidate (or owner lane) waits
-      for the owner.  Auto-accept (F15) only clears a candidate when the
+      for the owner. Auto-accept only clears a candidate when the
       authority preset grants it; otherwise the first candidate is the
       stopping point, so a waiting plan never looks silently stalled.
 
@@ -1001,7 +1001,7 @@ def deliver_plan_notices(
 def plan_return_summaries(
     db: Any, *, now: datetime | None = None
 ) -> tuple[dict[str, Any], ...]:
-    """The plan section of M3's return summary, from the live records.
+    """The plan section of the return summary, from the live records.
 
     One entry per active plan with the lane groups the owner reads after being
     away: accepted, running, parked (stalled) and waiting on the owner, plus

@@ -1,8 +1,9 @@
-"""Self-healing after a vendor CLI update (F18, ADR-0031).
+"""Self-healing after a vendor CLI update (ADR-0031).
 
-F5 (:mod:`saberops.vendor_cli_fixtures`) records the version each adapter was
-verified against and can tell a version change apart from a removed flag
-without sending a prompt.  This module acts on that evidence:
+The checked-in manifest (:mod:`saberops.vendor_cli_fixtures`) records the
+version each adapter was verified against and can tell a version change apart
+from a removed flag without sending a prompt.  This module acts on that
+evidence:
 
 * **Detect** -- compare every installed vendor CLI with its last verified
   version on scheduler start and periodically.  A change marks the vendor
@@ -13,7 +14,7 @@ without sending a prompt.  This module acts on that evidence:
 * **Check** -- run the allowlisted ``--help`` guard, then one tiny smoke prompt
   through the vendor's own worker adapter (the normal isolated path) in a
   throwaway repository.  The smoke is on by default, runs at most once per
-  installed version, and is skipped while the F17 work gate is closed.
+  installed version, and is skipped while the work gate is closed.
 * **Heal** -- when both checks pass, record the new version as verified and
   resume routing with one notice.  When a check fails, file exactly one repair
   job on the SaberOps repository with the evidence and keep the vendor parked
@@ -537,7 +538,7 @@ def detect_changes(
 ) -> list[VendorChange]:
     """Compare installed versions with the last verified ones (no prompts).
 
-    The first pass seeds each vendor from the checked-in F5 manifest, so the
+    The first pass seeds each vendor from the checked-in manifest, so the
     feature starts from the interface the adapters were verified against.  A
     change marks the vendor unverified (or pin-mismatched) and sends exactly
     one notice per new version.  A rollout back to the verified version heals
@@ -1041,7 +1042,7 @@ def run_checks(
     omits an adapter-pinned flag is a failure; an unreadable probe stays
     unverified and parks the vendor without filing a repair job.  When the
     help guard passes, one smoke prompt runs (at most once per installed
-    version, skipped while the F17 gate is closed or when the owner turned the
+    version, skipped while the gate is closed or when the owner turned the
     smoke off).
     """
     loaded = manifest if manifest is not None else load_manifest()

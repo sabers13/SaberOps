@@ -281,7 +281,7 @@ class AutonomousSupervisor:
 
     @property
     def _work_gate_open(self) -> bool:
-        """F17: no recovery starts while the work gate is closed.
+        """No recovery starts while the work gate is closed.
 
         Retry, repair and escalation are *new execution*: closing the planning
         CLI must stop them exactly like a new job.  An unreadable gate is
@@ -1229,7 +1229,7 @@ def _verify_accept_engine_evidence(
             f"Project projection refused: 'run_accepted' event {event_id} "
             f"for run '{run_id}' has inconsistent provenance.candidate_sha."
         )
-    # F15: an explicit undo of this exact acceptance (``orch accept <run> --undo``)
+    # An explicit undo of this exact acceptance (``orch accept <run> --undo``)
     # makes the acceptance no longer describe the target.  Later evidence may
     # re-establish acceptance; only an undo that follows this event counts.
     from saberops.auto_accept import ACCEPT_UNDONE_EVENT

@@ -10,7 +10,7 @@ commit.  This module is the guarded path for that:
   ``full`` profile entry for the exact SHA (``G3``, ``main-gate`` or ``manual``);
 * the checkout must be **at that commit and clean**, so the reinstall can only
   build committed code;
-* every RUNNING worker is parked at a safe point through the F17 pause path
+* every RUNNING worker is parked at a safe point through the pause path
   before the reinstall and released afterwards, so nothing is discarded;
 * the new install is recorded in the restart marker and ``orch --version`` is
   reported before and after.

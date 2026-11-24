@@ -260,7 +260,7 @@ class SessionControls:
         self.sync_chat(message, response[:32000])
 
     def sync_chat(self, message: dict[str, Any], response: str | None = None) -> None:
-        # The chat frontend was removed (L-A step 5): there is no conversation
+        # There is no conversation
         # store to mirror manual messages into.  The session journal remains
         # the durable record; this is a no-op so engine callers keep working.
         return

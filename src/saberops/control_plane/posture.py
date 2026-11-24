@@ -1,8 +1,8 @@
-"""Pure billing-posture decision (M2-2, step E).
+"""Pure billing-posture decision.
 
 Selects the most specific posture record for a route and decides
 whether unattended execution is admitted.  This module performs no
-I/O and is not wired into preflight or routing (that is M2-4b).
+I/O and is not wired into preflight or routing.
 
 TTL boundary: ``expires_on = verified_on + ttl_days`` and the record
 is valid *through* ``expires_on`` (expired when

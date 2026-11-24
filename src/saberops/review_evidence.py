@@ -4,7 +4,7 @@ The acceptance protocol requires a reviewer to answer every clause, and a
 clause it cannot verify is a FAIL.  A candidate diff alone cannot show the
 content of an unchanged implementation file, the output of the gate, or a
 repository-wide absence.  Without that evidence honest work was rejected by a
-contract that could only see the diff (N14 false negatives).
+contract that could only see the diff (false negatives).
 
 This module builds the missing, *trusted* material from the candidate tree
 itself: the full content of every touched file, the in-repository modules they

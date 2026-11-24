@@ -2,8 +2,8 @@
 
 This module wires the small FastAPI application served by ``orch ui``. It keeps
 only the first-run setup, accounts and questions pages; run monitoring, plan
-and wave scoring, the routing editor and the storage cleanup page were retired
-by phase 1.1 lane H23, and phase 2 rebuilds the board on this server.
+and wave scoring, the routing editor and the storage cleanup page are gone;
+the first-run pages remain.
 """
 # ruff: noqa: E501
 
@@ -510,7 +510,7 @@ def _materialize_discovered_binding(
     resolves.  Returns ``(owner, worker_binding)`` or ``None``.
     """
     if not connection.is_account_backed:
-        # Direct API execution was removed (H17).
+        # Direct API execution has no adapter.
         return None
     adapter = registry.get(connection.provider)
     if adapter is None:
@@ -591,7 +591,7 @@ def _apply_exact_execution_bindings(
             support[model.identity] = model.execution_support
             continue
         if not connection.is_account_backed:
-            # Direct API connections were removed (H17): no execution exists.
+            # Direct API connections are not supported: no execution exists.
             support[model.identity] = ExecutionSupport.UNSUPPORTED
             continue
         if registry.get(connection.provider) is None:
@@ -628,8 +628,8 @@ def _discover_connection(
     Account-backed backends use their own supported listing boundary where
     one exists (listing commands or Claude/Copilot native control protocols);
     backends with no supported enumeration stay truthfully ``UNKNOWN`` rather
-    than inventing a catalog.  A stored direct-API connection (removed, H17)
-    enumerates nothing: it has no executable transport.
+    than inventing a catalog. A stored direct-API connection enumerates
+    nothing: it has no executable transport.
 
     Execution support is proven *after* enumeration by materializing an exact
     Binding and resolving it with the real adapter -- never inferred
@@ -779,7 +779,7 @@ def _is_private_web_path(path: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Step 019 (UI-1) — the kept first-run onboarding surface.
+# The kept first-run onboarding surface.
 #
 # Read projections and owner-confirmed mutations for first-run Setup, Accounts
 # and Questions: readiness diagnostics, honest vendor logins, connection/model
@@ -1283,7 +1283,7 @@ def _owner_mode_view() -> dict[str, Any]:
 
 
 def _work_gate_view(db: Database) -> dict[str, Any]:
-    """The F17 work gate: paused or running, why, and what is parked."""
+    """The work gate: paused or running, why, and what is parked."""
     try:
         from saberops.runtime_gate import gate_view
 
@@ -1396,15 +1396,12 @@ def create_app(
 ) -> FastAPI:
     """Build the kept owner-pages application.
 
-    Phase 1.1 lane H23 reduced the console to the pages phase 2 reuses:
-    first-run Setup, Accounts and Questions, plus ``/health`` for
-    stale-install diagnostics.  Run monitoring, run reports and owner
-    accept/reject, plan and wave scoring, the routing editor and the storage
-    cleanup page moved out with it; the engine and the ``orch`` CLI keep
-    those operations.  The ``projects`` parameter is gone with
-    ``saberops.projects``; ``repo_path`` is accepted for launch
-    compatibility.  Passing an explicit ``db_path`` pins the whole app to
-    that single store.
+    The console serves the kept pages: first-run Setup, Accounts and
+    Questions, plus ``/health`` for stale-install diagnostics.  The engine and
+    the ``orch`` CLI own run monitoring, run reports, owner accept/reject, plan
+    and wave scoring, the routing editor and the storage cleanup.  ``repo_path``
+    is accepted for launch compatibility.  Passing an explicit ``db_path`` pins
+    the whole app to that single store.
     """
     del seed_cwd_if_empty
     resolved_db_path: str | Path | None = db_path
@@ -1503,7 +1500,7 @@ def create_app(
 
     @app.get("/", name="home")
     def home(request: Request) -> RedirectResponse:
-        """The app opens on Setup until phase 2's board page replaces this entry."""
+        """The app opens on Setup."""
         return RedirectResponse(url="/setup", status_code=303)
 
     @app.get("/first-run", name="first_run")
@@ -1831,7 +1828,7 @@ def create_app(
         max_jobs: Annotated[str, Form()] = "",
         clear: Annotated[str, Form()] = "",
     ) -> Response:
-        """Owner-only mode switch from the Questions page (F1)."""
+        """Owner-only mode switch from the Questions page."""
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
@@ -1866,7 +1863,7 @@ def create_app(
         reason: Annotated[str, Form()] = "",
         confirm: Annotated[str, Form()] = "",
     ) -> Response:
-        """Owner-only instant stop from the Questions page (F17)."""
+        """Owner-only instant stop from the Questions page."""
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
@@ -1900,7 +1897,7 @@ def create_app(
         csrf: Annotated[str, Form()] = "",
         confirm: Annotated[str, Form()] = "",
     ) -> Response:
-        """Owner-only confirmed resume from the Questions page (F17)."""
+        """Owner-only confirmed resume from the Questions page."""
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,

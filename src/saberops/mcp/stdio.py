@@ -1,4 +1,4 @@
-"""Newline-delimited JSON-RPC transport over standard I/O (M3).
+"""Newline-delimited JSON-RPC transport over standard I/O.
 
 MCP's stdio transport is one JSON-RPC message per line on stdin and one
 response per line on stdout.  Log or diagnostic output must never be written to

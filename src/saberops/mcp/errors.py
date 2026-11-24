@@ -1,4 +1,4 @@
-"""Typed refusals for the SaberOps MCP interface (Step 014 / M3).
+"""Typed refusals for the SaberOps MCP interface.
 
 Every refusal is a value, not a traceback: the stdio server maps an
 :class:`McpError` onto a JSON-RPC 2.0 error object with a stable code, so a
@@ -7,8 +7,8 @@ client can distinguish "the server does not offer that operation"
 (:class:`InvalidParamsError`) or "you are the read-only client"
 (:class:`LeaseReadOnlyError`).
 
-Authority is deterministic: the MCP layer refuses operations that
-D7 marks **never exposed** (approving proposals, moving ``main``, pushing,
+Authority is deterministic: the MCP layer refuses the operations listed as
+**never exposed** (approving proposals, moving ``main``, pushing,
 quarantine approval, posture attestation, gate execution, tracked-source
 edits, deletions outside ``.orch``) before any handler runs.
 """

@@ -1,11 +1,11 @@
 """Attended terminal sessions: presence without an AI CLI planning session.
 
-Phase 1 lane F24 makes presence mandatory for every store: with no AI CLI
-planning session connected, SaberOps starts nothing.  A plain ``orch`` command
+Presence is mandatory for every store: with no AI CLI planning session
+connected, SaberOps starts nothing.  A plain ``orch`` command
 in a terminal is not presence by itself.  Presence is granted only while an
 *attended terminal session* stays open:
 
-* ``orch watch`` (the read-only tmux view, F23) while a terminal is attached;
+* ``orch watch`` (the read-only tmux view) while a terminal is attached;
 * ``orch run --attended`` while that command runs in the foreground.
 
 Each session writes one small record under the owner state directory and

@@ -266,9 +266,9 @@ class OpenCodeAdapter(WorkerAdapter):
         #
         # The installed opencode v2.3.2 ``run --help`` (committed at
         # tests/fixtures/vendor_cli/opencode/opencode-v2.3.2/config_help.txt)
-        # documents neither ``--dir`` nor ``--pure`` (HV-1 finding F1, fixed in
-        # Step 024/HV-2).  The worktree is carried by the child ``cwd`` below --
-        # not by an argv flag -- and config/plugin isolation comes from
+        # documents neither ``--dir`` nor ``--pure``.  The worktree is carried by
+        # the child ``cwd`` below -- not by an argv flag -- and config/plugin
+        # isolation comes from
         # ``workers/opencode_isolation.py``: a private config/home root, project
         # and ancestor discovery disabled, ambient config selectors removed and
         # inline deny policies.  Do not re-add a flag that the installed CLI's

@@ -251,7 +251,7 @@ NEVER_DELEGABLE_KINDS: Final[tuple[NeverDelegableKind, ...]] = tuple(NEVER_DELEG
 
 
 class AutonomyClass(StrEnum):
-    """The three autonomous decision classes (roadmap RD-1)."""
+    """The three autonomous decision classes."""
 
     CLASS_1_GATED_ACCEPT = "class_1_gated_accept"
     CLASS_2_RECOMMENDED = "class_2_recommended"
@@ -2461,7 +2461,7 @@ class ReturnSummary:
     preflight: dict[str, Any] | None
     plans: tuple[dict[str, Any], ...] = ()
     awaiting_acceptance: tuple[dict[str, Any], ...] = ()
-    #: Every planning-session self-answer, read from the one kept record (H27).
+    #: Every planning-session self-answer, read from the one kept record.
     self_answered: tuple[dict[str, Any], ...] = ()
 
     @property
@@ -2528,7 +2528,7 @@ def awaiting_acceptance(db: Any, *, limit: int = 1000) -> tuple[dict[str, Any], 
     """Every SUCCEEDED job whose candidate still waits for the owner.
 
     The away journal records decisions, not jobs, so a fresh return summary
-    that read only the journal omitted standalone away candidates (D17).  This
+    that read only the journal omitted standalone away candidates. This
     projection is read-only and reuses the same candidate lifecycle and owner
     action the job surfaces show: the command named here is the exact one the
     owner can type.
@@ -2578,7 +2578,7 @@ def awaiting_acceptance(db: Any, *, limit: int = 1000) -> tuple[dict[str, Any], 
 
 
 def _self_answered_for_summary() -> tuple[dict[str, Any], ...]:
-    """Read every planning-session self-answer from the one kept record (H27)."""
+    """Read every planning-session self-answer from the one kept record."""
     from saberops.questions import OwnerQuestionQueue, QuestionStoreError
 
     try:
@@ -2602,7 +2602,7 @@ def build_return_summary(
     When ``db`` is available, standalone SUCCEEDED candidates that still wait
     for acceptance are projected too, so "while you were away" names the exact
     accept command instead of reporting only plan lanes.  Self-answered
-    decisions come from the question audit list, the one kept record (H27).
+    decisions come from the question audit list, the one kept record.
     """
     resolved = journal if journal is not None else AwayJournal()
     records = resolved.records()
@@ -2908,7 +2908,7 @@ def evaluate_dispatch(
             never_delegable=never_delegable_for_question(request.decision_class),
         )
         # Away applies the decision sheet to questions.  Candidate acceptance is
-        # a separate engine stage (F15 auto-accept) and never flows through this
+        # a separate engine stage (auto-accept) and never flows through this
         # question resolver, so an unanswered question still parks its branch.
         resolution = resolve_decision(
             sheet,

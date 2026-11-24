@@ -1,7 +1,7 @@
-"""Submit-time feasibility (M2-3 section E, pure).
+"""Submit-time feasibility (pure).
 
 Called once, by ``submit_job``, before the insert. Never called at
-dispatch (that is M2-4b's ``admit()``), never contacts a provider,
+dispatch (that is ``admit``), never contacts a provider,
 never reads quota or posture.
 
 Which chain: the candidate set is the build route

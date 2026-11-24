@@ -1,4 +1,4 @@
-"""Deterministic cross-phase ready-frontier projection (Step 015 / PL-1-PF).
+"""Deterministic cross-phase ready-frontier projection.
 
 What this module is
 -------------------
@@ -32,7 +32,7 @@ reimplement them:
 
 The 3x5 relationship in one sentence: this projection answers *"which tasks are
 ready and, up to the owner's declared per-project and active-project maxima,
-reportable as a ready set across all phases?"*; Step 010 answers *"given
+reportable as a ready set across all phases?"*; a launch caller answers *"given
 currently occupied slots, may this specific candidate start, transactionally?"*.
 Only the second is launch authority.
 
@@ -69,7 +69,7 @@ The optional :data:`REQUIRES_TRANSACTIONAL_VERIFICATION` flag is always true:
 no production launch may trust this pure projection on its own. A real launch
 path MUST hold an exclusive lease/write fence, re-verify snapshot completeness
 and freshness inside the same critical section, and defer slot admission to
-Step 010's transactional caller.
+the transactional caller.
 """
 
 from __future__ import annotations
@@ -894,5 +894,3 @@ def project_ready_frontier(request: FrontierRequest) -> FrontierProjection:
     )
 
 
-# ScheduledTask, ScheduledWave and WaveScheduleError lived here for the
-# web-only wave optimizer; both were deleted with it (ADR-0071).

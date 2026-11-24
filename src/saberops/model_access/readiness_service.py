@@ -173,8 +173,8 @@ class ReadinessService:
     def refresh(self, connection: ProviderConnection) -> ProviderReadinessEvidence:
         """Execute at most the declared non-inference status command and persist its projection."""
         if not connection.is_account_backed:
-            # A stored direct-API connection has no executable transport since
-            # H17; it is never READY and nothing is sent anywhere.
+            # A stored direct-API connection has no executable transport; it is never
+            # READY and nothing is sent anywhere.
             evidence = ProviderReadinessEvidence(
                 connection_id=connection.connection_id,
                 provider=connection.provider,
@@ -372,7 +372,7 @@ class ReadinessService:
                 )
             connection = matches[0]
         if not connection.is_account_backed:
-            # Direct API execution was removed (H17).
+            # A direct-API connection has no executable transport.
             return ReadinessAdmission(
                 ProviderReadiness.NOT_READY, "PROTOCOL_UNSUPPORTED", False,
                 connection.connection_id,

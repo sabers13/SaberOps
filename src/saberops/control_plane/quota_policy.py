@@ -1,4 +1,4 @@
-"""Canonical quota-pool red-line policy (M2-1: T-005 + exclusions)."""
+"""Canonical quota-pool red-line policy and exclusions."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _normalize_mode(value: object) -> QuotaPoolMode:
     return QuotaPoolMode.STRICT
 
 
-#: Deprecated alias kept importable (T-005 d).
+#: Deprecated alias kept importable.
 WEEKLY_QUOTA_RED_LINE = "RED_LINE_WEEKLY"
 
 QUOTA_EXCLUDED_UNTIL_RESET = "QUOTA_EXCLUDED_UNTIL_RESET"
@@ -152,7 +152,7 @@ def _matches(state: QuotaState, candidate: WorkerCandidate, policy: QuotaPoolPol
     # provider-wide default (see ``materialize_discovered_binding``): without a
     # resolved policy its evidence must not govern unbound candidates of the
     # same provider.  Otherwise one account's probe (e.g. OpenCode Go) would
-    # block unrelated routes of that provider (OpenCode Zen) - N2.
+    # block unrelated routes of that provider (OpenCode Zen).
     if str(state_pool).startswith("discovered-pool:"):
         return False
     exclusion_pool = getattr(state, "pool_id", None)

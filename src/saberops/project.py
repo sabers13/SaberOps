@@ -441,7 +441,7 @@ def objective_id_for(project_id: str, task: str) -> str:
     return f"obj_{digest[:OBJECTIVE_ID_LENGTH]}"
 
 
-#: Stable slug format for explicitly registered Step 015 project IDs:
+#: Stable slug format for explicitly registered project IDs:
 #: lowercase letters, digits and interior dashes only.
 PROJECT_ID_PATTERN = r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
 _PROJECT_ID_RE = re.compile(f"^{PROJECT_ID_PATTERN}$")
@@ -463,7 +463,7 @@ class ProjectCapError(ProjectRegistrationError):
 
 @dataclass(frozen=True)
 class RegisteredProject:
-    """One explicitly registered stable project (Step 015 / PL-1).
+    """One explicitly registered stable project.
 
     Unlike :class:`ProjectIdentity` (derived from a repository checkout),
     a registered project carries an explicit owner-chosen slug
@@ -536,7 +536,7 @@ def default_project_registry_path() -> Path:
 
 
 class ProjectRegistry:
-    """Durable file-backed registry of stable projects (Step 015 / PL-1).
+    """Durable file-backed registry of stable projects.
 
     The registry persists ``{project_id: RegisteredProject}`` as JSON with
     atomic writes and enforces the owner-approved cap of

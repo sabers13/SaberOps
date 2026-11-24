@@ -29,7 +29,7 @@ from saberops.models import WorkerCandidate
 
 SCHEMA_VERSION = 3
 
-#: The one role vocabulary (contract C3 from Wave 2). No second role enum.
+#: The one role vocabulary. No second role enum.
 #: Only the build role carries routing chains; check bindings live in the
 #: reviewer store and the plan role is the external CLI session.
 ROUTED_ROLES: tuple[JobRole, ...] = (JobRole.BUILD,)
@@ -77,7 +77,7 @@ ALLOWED_CANDIDATES: frozenset[str] = frozenset(
 #: part of the *same* canonical routing document (never a second routing file).
 _APPROVED_TOP_KEY = "approved_candidates"
 
-#: Route ids retired with a worker adapter (H17).  An effective routing document
+#: Route ids retired with a worker adapter. An effective routing document
 #: that still names one loads without it and reports one notice; a persisted
 #: pre-upgrade snapshot keeps its ids so its stored digest still verifies.
 _RETIRED_CANDIDATES: frozenset[str] = frozenset(

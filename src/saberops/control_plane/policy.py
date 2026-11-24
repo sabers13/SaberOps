@@ -15,7 +15,7 @@ from saberops.control_plane.plans import PlanSet, validate_plan_sections
 from saberops.control_plane.quota_policy import QuotaPoolMode, QuotaPoolPolicy
 
 #: Owner-approved interim default for the aggregate ceiling on concurrently
-#: RUNNING top-level scheduled jobs (D7 global slot). Derived from the owner
+#: RUNNING top-level scheduled jobs (global slot). Derived from the owner
 #: decision of "3 active projects x 5 executing tasks"; it is an interim
 #: aggregate bridge only and does NOT enforce the project-aware 3x5 policy
 #: (that belongs to project registry / UI steps).
@@ -107,7 +107,7 @@ def _quota_pool_entry(pool: QuotaPoolPolicy) -> dict[str, object]:
 
     Explicit 54878ce field set (mode, red_line_pct, members) plus
     ``overage_possible`` only when True, so a value that matters is
-    covered by the digest once M2-4b activates it.
+    covered by the digest once the policy activates it.
     """
     entry: dict[str, object] = {
         "mode": pool.mode.value,

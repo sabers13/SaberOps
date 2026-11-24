@@ -1,6 +1,6 @@
 """Worker execution isolation: the host-side boundary around one worker.
 
-M4 ("Isolate Workers & Protect Owner Actions") needs a deterministic
+Worker isolation needs a deterministic
 answer to a question the sandbox *policy evidence* alone cannot answer:
 *may this worker execution touch this host path, run this git command, and
 carry this session authority?*
@@ -108,7 +108,7 @@ OWNER_SESSION_VALUE: Final[str] = "owner"
 
 
 class SessionAuthority(StrEnum):
-    """Who a session claims to be, in the two-valued M4 vocabulary."""
+    """Who a session claims to be, in the two-valued vocabulary."""
 
     OWNER = OWNER_SESSION_VALUE
     WORKER = WORKER_SESSION_VALUE
@@ -209,11 +209,10 @@ def is_host_config_path(path: str | os.PathLike[str], *, home: str | None = None
 # ---------------------------------------------------------------------------
 
 #: Host names that name this loopback server directly.  Mirrors the
-#: transport allowlist added to ``saberops.web`` by the early Step 020
-#: commit so the durable owner-action layer can assert the same
-#: loopback-only transport invariant.  ``saberops.web`` remains the
-#: transport *enforcement* authority (it is outside this lane's write
-#: scope); this module only decides whether a claimed origin is loopback.
+#: transport allowlist in ``saberops.web`` so the durable owner-action
+#: layer can assert the same loopback-only transport invariant.
+#: ``saberops.web`` remains the transport *enforcement* authority; this
+#: module only decides whether a claimed origin is loopback.
 LOOPBACK_HOST_NAMES: Final[frozenset[str]] = frozenset({"127.0.0.1", "localhost", "::1"})
 #: The synthetic ASGI test server name, accepted only in a synthetic scope.
 SYNTHETIC_TEST_HOST: Final[str] = "testserver"

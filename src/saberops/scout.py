@@ -1,9 +1,9 @@
-"""F19 scout jobs: a read-only investigation that delivers a report.
+"""Scout jobs: a read-only investigation that delivers a report.
 
 A scout is a job *kind* on the build route, never a fourth role.  The worker
 runs with the CLI's own read-only permission rules on the run's scratch copy;
 the engine writes the report from the worker's final answer into the plain
-per-run folder E4 already keeps (``<state dir>/jobs/<run_id>/``).
+per-run folder the engine already keeps (``<state dir>/jobs/<run_id>/``).
 
 Nothing else the worker may have changed is kept: any diff against the base is
 discarded (the scratch copy is reset) and recorded as a violation on the job.
@@ -198,7 +198,7 @@ def write_report(
     model: str | None,
     body: str,
 ) -> tuple[Path, ScoutReport]:
-    """Write the report into the run's E4 folder and return it with its index."""
+    """Write the report into the run's folder and return it with its index."""
     cleaned = body.strip()
     if not cleaned:
         raise ValueError("a scout report must not be empty")
@@ -226,7 +226,7 @@ def write_report(
 
 
 def report_folder(state_dir: Path | str, run_id: str) -> Path:
-    """The E4 per-run folder that holds this scout's report."""
+    """The per-run folder that holds this scout's report."""
     return job_folder(state_dir, run_id)
 
 

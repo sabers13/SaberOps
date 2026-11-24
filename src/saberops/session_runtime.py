@@ -267,7 +267,7 @@ class AgentSessionRuntime:
                 # No ``--pure``: the installed opencode v2.3.2 ``serve --help``
                 # (committed at
                 # tests/fixtures/vendor_cli/opencode/opencode-v2.3.2/config_help.txt)
-                # documents no such flag (HV-1 F1, fixed in Step 024/HV-2).
+                # documents no such flag.
                 # Config/plugin isolation comes from ``child_env`` (a private
                 # config/home root owned until the server stops); the worktree
                 # is the child ``cwd`` and the per-request ``?directory=``
@@ -548,7 +548,7 @@ class AgentSessionRuntime:
         symptom (HTTP 503 / connection refused).  When the monitor has begun
         terminating the process -- or the launch thread has already finished
         -- wait briefly for the result so the durable attempt names the cut
-        (N17) instead of the symptom.
+        instead of the symptom.
         """
         if self.process_result is not None:
             return self.process_result

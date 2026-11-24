@@ -725,7 +725,7 @@ class RunSupervisor:
         from saberops.native_workers import native_run_marker
 
         if native_run_marker(self.db, run_id) is not None:
-            # F16: a native child has no execution owner and no supervised
+            # A native child has no execution owner and no supervised
             # worker identity.  Its liveness is the heartbeat deadline, so the
             # supervisor must never orphan it; a silent child becomes
             # needs-attention through the native control path instead.
@@ -883,9 +883,9 @@ class RunSupervisor:
                 )
             return result
 
-        # R2: a run carrying a durable D8 transaction (decision or verified
+        # A run carrying a durable transaction (decision or verified
         # artifacts) must be finished by the preemption recovery path BEFORE
-        # generic orphan/recovery selection.  A run with no D8 receipt keeps
+        # generic orphan/recovery selection. A run with no receipt keeps
         # the existing recovery/orphan decision unchanged.
         preempt_result = self._recover_preemption_transaction(run, owner, dry_run=dry_run)
         if preempt_result is not None:
@@ -994,11 +994,11 @@ class RunSupervisor:
     def _recover_preemption_transaction(
         self, run: Run, owner: ExecutionOwner | None, *, dry_run: bool
     ) -> dict[str, object] | None:
-        """Finish (or fail closed on) an interrupted D8 transaction (R2).
+        """Finish (or fail closed on) an interrupted transaction.
 
         Called from :meth:`reconcile` only after the owner and worker have both
         been proven DEAD and the run is non-terminal, so no live worker can be
-        mutated.  Returns a result dict when this run carries a D8 receipt;
+        mutated. Returns a result dict when this run carries a receipt;
         returns ``None`` for an ordinary RUNNING run so the existing
         recovery/orphan decision stays exactly as before.
         """
@@ -1034,7 +1034,7 @@ class RunSupervisor:
             "action": "none",
         }
         if txn.state == "blocked":
-            # A durable D8 receipt that does not verify is NEVER downgraded to
+            # A durable receipt that does not verify is NEVER downgraded to
             # generic orphaning or silently settled: retain state + charge and
             # surface the exact cause for the owner.
             result["reason"] = f"preemption_blocked:{txn.detail}"
@@ -1663,7 +1663,7 @@ class RunSupervisor:
     def pause(self, run_id: str, *, reason: str = "paused") -> bool:
         """Stop one run's worker and park the run without discarding its work.
 
-        F17: this is the "safe point" stop.  It uses exactly the fenced
+        This is the "safe point" stop.  It uses exactly the fenced
         termination path of :meth:`cancel` -- cancel the inspected ownership
         generation, confirm the worker tree is extinct, then stop the owner --
         but it terminalizes the run as :attr:`RunStatus.PREEMPTED` instead of

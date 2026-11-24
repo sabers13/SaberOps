@@ -1,4 +1,4 @@
-"""Native subagent workers from the orchestrating CLI (ADR-0030, F16).
+"""Native subagent workers from the orchestrating CLI (ADR-0030).
 
 The orchestrating CLI's own subagents can do some of the work natively while
 other jobs run as ordinary SaberOps workers, and one orchestrator controls both
@@ -205,7 +205,7 @@ def _clean_vendor(value: object) -> str:
 
 
 def _require_work_gate(db: Database, *, action: str) -> None:
-    """Refuse a new start while the F17 work gate is closed (ADR-0029)."""
+    """Refuse a new start while the work gate is closed (ADR-0029)."""
     from saberops.runtime_gate import evaluate_gate
 
     try:
@@ -404,7 +404,7 @@ def _new_run(db: Database, job: Job, *, vendor: str, model: str) -> Run:
             provider_override=vendor,
             model_override=model,
             review_enabled=True,
-            # H20: a natively claimed job keeps the planner's consequential
+            # A natively claimed job keeps the planner's consequential
             # marker, so away and critical-only still park its candidate.
             consequential=job.requirements.consequential,
         )
@@ -934,7 +934,7 @@ def record_native_attempt(
             f"job {job_id} is {job.state.value}; its result can no longer be recorded",
             data={"job_id": job_id, "state": job.state.value},
         )
-    # F17: a report runs the project gate and a fresh reviewer, which is new
+    # A report runs the project gate and a fresh reviewer, which is new
     # work.  While the work gate is closed nothing new starts, so the report is
     # refused before any durable mutation and can be retried after `orch
     # resume`; the child's committed worktree is preserved meanwhile.

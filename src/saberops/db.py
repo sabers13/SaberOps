@@ -284,7 +284,7 @@ class Database:
             with conn:
                 yield conn
         except sqlite3.OperationalError as exc:
-            # D7: lock contention at a deferred write boundary is a typed INFRA
+            # Lock contention at a deferred write boundary is a typed INFRA
             # park, never a raw crash. Non-contention errors (missing legacy
             # table/column) keep their existing semantics.
             if is_busy_error(exc):
@@ -2343,7 +2343,7 @@ class Database:
         * the inspected owner generation must still be the active ``CLAIMED``
           generation, so a newer owner that claimed the run while this decision
           was being made is never orphaned or released;
-        * **no attempt may still be RUNNING/PENDING**: the D8 decision was
+        * **no attempt may still be RUNNING/PENDING**: the decision was
           taken only after the attempt had already reached its durable
           terminal (FAILED/QUOTA) state, so the ordinary "force-close an active
           attempt" behaviour would be masking a live worker.  A live attempt
@@ -3635,7 +3635,7 @@ class Database:
             conn.commit()
 
     # ------------------------------------------------------------------
-    # Run-scoped project-scope evidence written before phase 1.1 lane H15.
+    # Run-scoped project-scope evidence written by an older build.
     # The readers return plain JSON rows so a stored run keeps its report
     # evidence; no current path writes these tables.
     # ------------------------------------------------------------------
@@ -3991,7 +3991,7 @@ class Database:
         Delegates to the capacity ledger (:func:`record_owner_quota`):
         the observation is appended to ``capacity_observations`` and the
         ``quota_state`` row is upserted with ``routing_state = NORMAL``.
-        The legacy 25 % BLOCK/DEMOTE policy is deleted (M2-4a).
+        No fixed 25 % BLOCK/DEMOTE threshold is applied.
 
         Quota is owner-wide configuration, so a project-local database
         delegates to the single global owner store.
@@ -4942,18 +4942,18 @@ class Database:
         )
 
     # ------------------------------------------------------------------
-    # GS-1 storage lifecycle persistence
+    # Storage lifecycle persistence
     #
     # These tables are additive: ``DB_SCHEMA_VERSION`` stays 1 and the
     # unknown/legacy-schema protection in ``_init_db`` is unchanged.  Every
-    # write uses the shared bounded D7 transaction policy so a busy lock
+    # write uses the shared bounded transaction policy so a busy lock
     # becomes a typed ``SqliteBusyError`` instead of a crash or a duplicate
     # launch.
     # ------------------------------------------------------------------
 
     @contextmanager
     def storage_write_transaction(self) -> Iterator[sqlite3.Connection]:
-        """Yield one bounded ``BEGIN IMMEDIATE`` write transaction (D7)."""
+        """Yield one bounded ``BEGIN IMMEDIATE`` write transaction."""
         if self._read_only:
             raise DatabaseSchemaError("cannot take a write transaction on a read-only database")
         with write_connection(self.db_path) as conn:

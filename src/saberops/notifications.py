@@ -223,7 +223,7 @@ def run_notification_ledger(db: Any) -> Path:
 def notify_run_terminal(
     db: Any, *, run_id: str, status: str, summary: str | None = None
 ) -> str:
-    """Deliver one durable terminal notice for a job-less direct run (N16).
+    """Deliver one durable terminal notice for a job-less direct run.
 
     Scheduler-dispatched runs are already covered by :func:`deliver_pending`'s
     job scan, so a run that any job owns is skipped here to avoid a duplicate

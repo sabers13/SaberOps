@@ -1,11 +1,11 @@
-"""Job queue types (M2-3 section A).
+"""Job queue types.
 
-Cross-lane contracts (identical text in the M2-3 and M2-4a prompts):
+Contracts:
 
-* C1: ``size_hint`` literal values are exactly ``"S"``, ``"M"``,
+* ``size_hint`` literal values are exactly ``"S"``, ``"M"``,
   ``"L"``. This module derives ``SIZE_HINTS`` from the shared
   ``saberops.capacity.cost_model.SizeBucket`` enum.
-* C3: one role vocabulary lives here (``JobRole``): ``PLAN``, ``BUILD`` and
+* One role vocabulary lives here (``JobRole``): ``PLAN``, ``BUILD`` and
   ``CHECK`` (ADR-0005 §3).  Only ``DISPATCHABLE_ROLES = {BUILD}`` is
   dispatchable; ``PLAN`` is the external CLI session and ``CHECK`` is the
   engine's independent reviewer.
@@ -21,7 +21,7 @@ from saberops.capacity.cost_model import SizeBucket
 
 
 class JobRole(StrEnum):
-    """The one role vocabulary (C3, ADR-0005 §3). Values equal names.
+    """The one role vocabulary (ADR-0005 §3). Values equal names.
 
     * ``PLAN``  — the external CLI session the owner sits in and submits from.
     * ``BUILD`` — the one accountable worker per task, including its own
@@ -66,7 +66,7 @@ DISPATCHABLE_ROLES: frozenset[JobRole] = frozenset({JobRole.BUILD})
 
 
 class JobKind(StrEnum):
-    """What a job delivers (F19).  Roles stay PLAN / BUILD / CHECK.
+    """What a job delivers. Roles stay PLAN / BUILD / CHECK.
 
     * ``BUILD`` — the ordinary job: a checked, reviewable candidate the owner
       can accept.
@@ -118,25 +118,25 @@ class WaitingReason(StrEnum):
     PREEMPTED = "PREEMPTED"
     CONCURRENCY = "CONCURRENCY"
     MEMORY_LOW = "MEMORY_LOW"
-    #: F1: the owner mode does not permit autonomous dispatch here.  ``away``
+    #: The owner mode does not permit autonomous dispatch here.  ``away``
     #: never exceeds the authority preset, so a preset without ``auto_start``
     #: parks the job instead of launching it.  Clears by itself when the mode
     #: or the preset changes.
     MODE_RESTRICTED = "MODE_RESTRICTED"
-    #: F8: at least one job named in ``Job.depends_on`` has not been accepted
+    #: At least one job named in ``Job.depends_on`` has not been accepted
     #: yet, so this job must not start.  Clears by itself once the dependency
     #: is accepted.
     DEPENDENCY = "DEPENDENCY"
-    #: H6: the owner or planner redirected a running attempt.  Its work is
+    #: The owner or planner redirected a running attempt.  Its work is
     #: anchored as a checkpoint and the job waits for the next dispatch, which
     #: restores that work and carries the steering note in its prompt.  Unlike
     #: ``PREEMPTED`` this is a deliberate correction and never spends the
     #: preemption budget.
     REDIRECTED = "REDIRECTED"
-    #: F8: a dependency ended FAILED or CANCELLED, so this job can never start.
+    #: A dependency ended FAILED or CANCELLED, so this job can never start.
     #: It never clears by itself; the owner cancels or resubmits it.
     DEPENDENCY_FAILED = "DEPENDENCY_FAILED"
-    #: F11: away mode parked this job on its own branch.  A never-delegable or
+    #: Away mode parked this job on its own branch.  A never-delegable or
     #: unhandled decision waits for the owner; independent jobs keep running.
     #: Clears by itself when the blocking question is answered or the away
     #: preflight/circuit breaker recovers.
@@ -145,7 +145,7 @@ class WaitingReason(StrEnum):
     #: Nothing ran, so the job is requeued once with this reason (and failed
     #: with the same-named failure reason if it happens again).
     DISPATCH_WINDOW_LOST = "DISPATCH_WINDOW_LOST"
-    #: F17: the owner gate closed (owner pause, no planning session, or an away
+    #: The owner gate closed (owner pause, no planning session, or an away
     #: session that ended) while this job was running.  The engine stopped the
     #: worker, saved a verified checkpoint and parked the job here.  It clears
     #: only when the owner or the returning planning session confirms a resume;
@@ -174,7 +174,7 @@ class Effort(StrEnum):
 
 
 class Difficulty(StrEnum):
-    """Planner-recorded task difficulty (H1).
+    """Planner-recorded task difficulty.
 
     The planner understands the task; the engine maps the recorded value onto
     a route.  These are judgements, never provider, model, tier or route
@@ -280,9 +280,9 @@ def scout_requirements(requirements: JobRequirements) -> JobRequirements:
     """Return a scout's kind-derived requirements: read-only and ``effort: low``.
 
     A scout is read-only, and an unstated effort becomes ``low`` so the cheap
-    model default is the same ``effort: low`` rule every job uses (H8,
-    ADR-0035) instead of a scout-only route.  The role stays BUILD: a scout is
-    a kind on the build route, never a second role.
+    model default is the same ``effort: low`` rule every job uses
+    (ADR-0035) instead of a scout-only route.  The role stays BUILD: a scout
+    is a kind on the build route, never a second role.
     """
     resolved = read_only_requirements(requirements)
     if resolved.effort is None:
@@ -308,7 +308,7 @@ def _clean_family_list(values: tuple[str, ...] | list[str], *, field: str) -> tu
 
 @dataclass(frozen=True)
 class JobRequirements:
-    """Caller-stated requirements (amended D6/section 11: no ``min_tier``)."""
+    """Caller-stated requirements (no ``min_tier``)."""
 
     role: JobRole = JobRole.BUILD
     effort: Effort | None = None
@@ -317,13 +317,13 @@ class JobRequirements:
     model_family_include: tuple[str, ...] = ()
     model_family_exclude: tuple[str, ...] = ()
     size_hint: str | None = None
-    #: Planner-recorded judgement, never a route name (H1).  Missing means
+    #: Planner-recorded judgement, never a route name. Missing means
     #: routine: the ordinary build chain.
     difficulty: Difficulty = Difficulty.ROUTINE
     #: Planner-authored focus for the independent reviewer.  It can only add
     #: attention; nothing can use it to turn review off.
     review_focus: str | None = None
-    #: Planner-recorded judgement (H20): this job's candidate is consequential
+    #: Planner-recorded judgement: this job's candidate is consequential
     #: (a data migration, deleting data, auth and security, an irreversible
     #: operation, effects outside the work copy), so away and critical-only
     #: park it for the owner instead of auto-accepting.  Missing means
@@ -403,7 +403,7 @@ class JobRequirements:
             model_family_include=tuple(data.get("model_family_include", ())),
             model_family_exclude=tuple(data.get("model_family_exclude", ())),
             size_hint=data.get("size_hint"),
-            # A row written before H1 has no difficulty; missing means routine.
+            # An older row has no difficulty; missing means routine.
             difficulty=coerce_difficulty(data.get("difficulty")),
             review_focus=data.get("review_focus"),
             consequential=bool(data.get("consequential", False)),
@@ -455,7 +455,7 @@ class SteeringNote:
     delivered_at: str | None = None
     delivered_run_id: str | None = None
     delivered_attempt_id: str | None = None
-    #: H6: set when the owner or planner deliberately dropped the note without
+    #: Set when the owner or planner deliberately dropped the note without
     #: delivering it.  A discarded note no longer blocks acceptance; it stays
     #: in the record so the decision is visible.
     discarded_at: str | None = None
@@ -496,7 +496,7 @@ class SteeringNote:
 
 @dataclass(frozen=True)
 class DependencyBlocker:
-    """Why a queued job's F8 dependencies do not let it start (pure contract).
+    """Why a queued job's dependencies do not let it start (pure contract).
 
     ``reason`` is the :class:`WaitingReason` the scheduler parks the job with;
     ``blocked_by`` names the dependencies responsible, sorted for determinism so
@@ -513,9 +513,9 @@ class Job:
     """One durable job. ``base_sha`` travels beside ``base_ref`` (section H):
 
     ``RunRequest`` has no field for it today, so the dispatch spec
-    carries both and M2-4b honours them at dispatch.
+    carries both and honours them at dispatch.
 
-    ``kind`` is the F19 job kind (BUILD or SCOUT).  A scout is the same BUILD
+    ``kind`` is the job kind (BUILD or SCOUT). A scout is the same BUILD
     role with an enforced read-only requirement and a report instead of a
     candidate; it is never a fourth role.
     """
@@ -556,7 +556,7 @@ class Job:
         if kind is JobKind.SCOUT:
             # A scout can never write, whatever the caller asked for, and an
             # unstated effort is the cheap default: both are properties of the
-            # job kind, not caller preferences (H8, ADR-0035).
+            # job kind, not caller preferences (ADR-0035).
             object.__setattr__(
                 self, "requirements", scout_requirements(self.requirements)
             )

@@ -1,9 +1,9 @@
-"""Owner question queue and the five-part escalation protocol (Q-1, Step 012).
+"""Owner question queue and the five-part escalation protocol.
 
 What this module is
 -------------------
-One service layer for the owner question queue and the
-Step 012 outcome.  A question is **keyed**: the same key asked twice is one
+One service layer for the owner question queue and the five-part
+escalation protocol. A question is **keyed**: the same key asked twice is one
 question, never a duplicate (idempotent tool contract).
 Any role may raise one, including a worker mid-run.
 
@@ -24,7 +24,7 @@ The invariants this module owns
   the evidence, the rejected alternative and, when given, the cost of a wrong
   answer.
 * A repeated same-kind owner answer becomes a **standing-rule proposal** for
-  CFG-1 (Step 013).  Proposals are inert data: this module applies nothing.
+  the workflow configuration. Proposals are inert data: this module applies nothing.
 
 The five-part escalation protocol
 ---------------------------------
@@ -41,7 +41,7 @@ quarantine, billing/posture, test changes against an accepted ADR, deleting
 outside the engine's own folders, approving config proposals) resolve to
 ``OWNER``; the Orchestrator-answerable criteria (classifying review findings,
 fix-up content, routing a G3 failure where the rules allow two targets, and
-other routine questions acknowledged under Q2) resolve to ``ORCHESTRATOR``;
+other routine questions the rules acknowledge) resolve to ``ORCHESTRATOR``;
 anything unknown fails closed to ``OWNER``.  An implementer role can never
 answer a question, and an Orchestrator can never answer its own finding.
 
@@ -140,7 +140,7 @@ QUESTIONS_STORE_ENV = "ORCH_QUESTIONS_STORE"
 #: Default number of repeated same-kind answers that becomes a standing rule.
 STANDING_RULE_THRESHOLD = 3
 
-#: The step that owns standing-rule proposals (CFG-1, Step 013).
+#: The workflow configuration that receives standing-rule proposals.
 CFG_1_TARGET = "CFG-1"
 
 #: The base path :func:`build_questions_router` mounts.
@@ -615,7 +615,7 @@ class OwnerAnswer:
     chosen_option: str | None = None
     evidence: str | None = None
     rejected_alternative: str | None = None
-    #: What a wrong answer would cost, when the planner can name it (H27).
+    #: What a wrong answer would cost, when the planner can name it.
     cost_if_wrong: str | None = None
 
     def __post_init__(self) -> None:
@@ -1028,7 +1028,7 @@ class QuestionReturnSummary:
 
 @dataclass(frozen=True)
 class StandingRuleProposal:
-    """A repeated same-kind owner answer, proposed as a standing rule to CFG-1."""
+    """A repeated same-kind owner answer, proposed as a standing rule."""
 
     kind: str
     chosen_answer: str
@@ -1437,7 +1437,7 @@ class OwnerQuestionQueue:
     def standing_rule_proposals(
         self, threshold: int = STANDING_RULE_THRESHOLD
     ) -> tuple[StandingRuleProposal, ...]:
-        """Propose a standing rule for CFG-1 when the owner answered the same
+        """Propose a standing rule for the workflow configuration when the owner answered the same
         way, for the same question kind, at least ``threshold`` times.
 
         Proposals are inert data.  This module writes no configuration.

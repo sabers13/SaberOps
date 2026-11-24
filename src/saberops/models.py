@@ -123,7 +123,7 @@ class DispatchStage(StrEnum):
     RETRY = "retry"
     REPAIR = "repair"
     REVIEW = "review"
-    #: F26: one read-only advisor checkpoint call, never a coding dispatch.
+    #: One read-only advisor checkpoint call, never a coding dispatch.
     ADVISOR = "advisor"
 
 
@@ -315,7 +315,7 @@ class BindingRole(StrEnum):
     ``BUILD`` is the worker slot and ``CHECK`` is independent review.  ``PLAN``
     is retired vocabulary (ADR-0064): the planner is the CLI session the owner
     sits in, so no code selects or creates a ``PLAN`` binding.  It stays
-    readable only so a store written before phase 1.1 still loads.
+    readable only so a store written before this vocabulary still loads.
 
     Distinct from :class:`DispatchRole`: ``BindingRole`` describes WHAT
     KIND of binding this is (the slot it fills in the autonomous
@@ -1009,9 +1009,8 @@ class WorkerCandidate:
 
     ``training_required`` is the frozen data-policy classification
     (``"TRUE"``/``"FALSE"``/``"UNKNOWN"``) attached at chain resolution
-    from the Run's frozen routing snapshot.  It is historical evidence
-    only: training-based admission is retired, so it never restricts a
-    candidate.  It is never populated from mutable live
+    from the Run's frozen routing snapshot.  It is evidence only:
+    training-based admission never restricts a candidate.  It is never populated from mutable live
     discovery/catalog/routing state.
     """
 
@@ -1041,12 +1040,12 @@ class QuotaState:
     mode: str | None = None
     red_line_pct: float | None = None
     members: tuple[str, ...] = ()
-    # M2-1 synthesized exclusion evidence (additive; None for raw rows).
+    # Synthesized exclusion evidence (additive; None for raw rows).
     exclusion_id: str | None = None
     exclusion_until: str | None = None
     exclusion_confidence: str | None = None
     exclusion_model_scope: str | None = None
-    # C8 additive read metadata: real source and window id when known.
+    # Additive read metadata: real source and window id when known.
     source: str | None = None
     window_id: str | None = None
 
@@ -1260,7 +1259,7 @@ class WorkerResult:
     outcome: DispatchOutcome | None = None
     usage: list[ProviderUsage] = field(default_factory=list)
     interruption_reason: WorkerInterruptionReason | None = None
-    # Engine-initiated early stop (not a continuation reason).  Today the N9
+    # Engine-initiated early stop (not a continuation reason). Today the
     # idle-tree cutoff sets ``"idle_tree_cutoff"`` plus the exact owner note so
     # the durable attempt names why it ended instead of surfacing a network
     # error.  Unlike ``interruption_reason`` this never authorizes a
@@ -1273,7 +1272,7 @@ class WorkerResult:
     # parse, else None).  The orchestrator consumes it when recording
     # quota evidence; it never selects a route.
     quota_reset_at: str | None = None
-    # M2-1 window/model/confidence passthrough (additive; None unknown).
+    # Window/model/confidence passthrough (additive; None unknown).
     quota_window: str | None = None
     quota_model_scope: str | None = None
     quota_reset_confidence: str | None = None
@@ -1459,8 +1458,8 @@ class RunResult:
 # ---------------------------------------------------------------------------
 # Canonical production phase vocabulary.
 #
-# ROADMAP §11 asks for wall-clock decomposition of the orchestration runtime
-# into the eleven named phases below.  Each phase MUST be reported using one
+# Wall-clock decomposition of the orchestration runtime into the eleven
+# named phases below.  Each phase MUST be reported using one
 # of the values defined here; ad-hoc strings are not a substitute.  New
 # phases can be added later by widening this enum explicitly, never by
 # sprinkling free-form labels through the runtime.
@@ -1468,7 +1467,7 @@ class RunResult:
 
 
 class PhaseKind(StrEnum):
-    """Canonical production phase vocabulary (ROADMAP §11).
+    """Canonical production phase vocabulary.
 
     The values are deliberately stable strings: callers and durable
     evidence readers exchange them verbatim, so renaming or re-ordering

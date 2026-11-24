@@ -1,4 +1,4 @@
-"""Durable versioned cross-phase plan store (Step 015 / PL-1).
+"""Durable versioned cross-phase plan store.
 
 What this module is
 -------------------
@@ -193,14 +193,14 @@ class PlanTaskDef:
     out_of_scope: str = ""
     acceptance: tuple[str, ...] = ()
     size: str = ""
-    #: Planner-recorded judgement (H1): ``routine`` (default) or ``hard``.
+    #: Planner-recorded judgement: ``routine`` (default) or ``hard``.
     difficulty: str = ""
     effort: str = ""
     model_family_include: tuple[str, ...] = ()
     model_family_exclude: tuple[str, ...] = ()
     priority: str = ""
     run: str = "job"
-    #: F19 job kind delivered by a dispatched lane: ``job`` (default, a
+    #: Job kind delivered by a dispatched lane: ``job`` (default, a
     #: candidate) or ``scout`` (a read-only report).  Owner-held lanes never
     #: dispatch, so they always stay ``job``.
     kind: str = "job"
@@ -208,7 +208,7 @@ class PlanTaskDef:
     #: Optional planner focus handed to the independent reviewer.  It can only
     #: add attention; it never turns review off.
     review_focus: str = ""
-    #: Planner-recorded H20 judgement: this lane's candidate is consequential,
+    #: Planner-recorded judgement: this lane's candidate is consequential,
     #: so away and critical-only park it for the owner instead of accepting it.
     #: Missing means ordinary; the engine's own diff floor applies either way.
     consequential: bool = False
@@ -276,11 +276,11 @@ class PlanTaskDef:
             }
         )
         # ``kind`` is written only for a scout lane: a format-2 revision stored
-        # before F19 hashes exactly as it did, so it still verifies.
+        # before this field hashes exactly as it did, so it still verifies.
         if self.kind and self.kind != "job":
             legacy["kind"] = self.kind
         # ``difficulty`` is written only when recorded, so a revision stored
-        # before H1 keeps its original content hash.
+        # before keeps its original content hash.
         if self.difficulty:
             legacy["difficulty"] = self.difficulty
         # Written only when set so an older revision's content hash still verifies.

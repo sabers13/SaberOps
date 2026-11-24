@@ -480,9 +480,9 @@ def _make_private_scratch(parent: Path) -> Path | None:
     return path
 
 
-#: Owner record written inside every gate scratch directory (GS-1 lifecycle
-#: registration).  It lets a later sweep decide from real process liveness and
-#: age without guessing from the directory name.
+#: Owner record written inside every gate scratch directory, registering it
+#: for lifecycle sweeps.  It lets a later sweep decide from real process
+#: liveness and age without guessing from the directory name.
 _SCRATCH_OWNER_FILENAME: Final = ".saberops-scratch-owner.json"
 _SCRATCH_PREFIX: Final = "orchestrator-gate-"
 
@@ -584,7 +584,7 @@ def sweep_gate_scratch(
 ) -> tuple[str, ...]:
     """Delete only *provably dead-owned* gate scratch directories under ``root``.
 
-    Safety contract (review F5):
+    Safety contract (review):
 
     * a live owner is never swept, regardless of age;
     * an unknown owner (no record, unreadable record, unknown liveness) is never
@@ -874,7 +874,7 @@ class GateRunnerRequest:
     evidence_dir: Path
     log_digest_label: str = "orchestrator-gate"
     safety_floor_bytes: int = _DEFAULT_SAFETY_FLOOR_BYTES
-    #: GT-1: the trusted base revision the gate definitions must match.  An
+    #: The trusted base revision the gate definitions must match.  An
     #: empty value is a legacy caller with no trusted revision to compare.
     base_sha: str = ""
     #: Candidate changed paths, so an added protected file is caught even when
@@ -960,7 +960,7 @@ class GateReceipt:
     memory_wait_seconds: float = 0.0
     memory_freeze_count: int = 0
     receipt_digest: str = ""
-    #: GT-1 verdict when the request carried a trusted base revision.
+    #: The verdict when the request carried a trusted base revision.
     gate_protection: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -1151,7 +1151,7 @@ class GateRunner:
 
         target = Path(request.target_repo).expanduser().resolve()
 
-        # GT-1: verify the candidate's gate definitions against the trusted
+        # Verify the candidate's gate definitions against the trusted
         # base BEFORE any backend choice, scratch creation or subprocess.  A
         # candidate that changed one never runs its own version; the block is
         # an owner question carried by the existing GateProtectionResult.
@@ -1181,7 +1181,7 @@ class GateRunner:
             if not protection.allowed:
                 raise GateProtectionBlockedError(protection)
 
-        # GS-1 /: consult the current free-space floor BEFORE any
+        # Consult the current free-space floor BEFORE any
         # backend choice, scratch creation or subprocess.  A below-floor or
         # unknown reading is a typed INFRA block with zero launches.  The
         # parameter exists so a caller can inject a bound guard; the default is
@@ -1786,7 +1786,7 @@ class GateSlotPoolProtocol(Protocol):
 
 
 class GateSlotPool:
-    """The engine's host-wide memory reservation pool (+ A8).
+    """The engine's host-wide memory reservation pool.
 
     Delegates directly to :class:`gate_tools.MemoryLedger` so every SaberOps
     copy, shell gate, and engine gate draws from one shared memory ledger.
@@ -1857,7 +1857,7 @@ def host_disk_admission(
 
     1. the shared current free-space floor is always enforced;
     2. when the storage ledger is available, the gate's declared estimate is
-       admitted through ``host-disk`` (Step 008 admission).  An ``EXCEEDED``
+       admitted through ``host-disk`` (admission). An ``EXCEEDED``
        decision blocks; an ``UNAVAILABLE`` ledger stays advisory because the
        floor in (1) already fails closed.
     """
@@ -1940,7 +1940,7 @@ def _read_quarantine(repo: Path) -> frozenset[str]:
 
 
 # ---------------------------------------------------------------------------
-# Gate protection: base-trusted gate definitions (GT-1)
+# Gate protection: base-trusted gate definitions
 # ---------------------------------------------------------------------------
 
 
@@ -2039,7 +2039,7 @@ def verify_gate_definitions(
     changed_paths: Sequence[str] = (),
     touches: Sequence[str] = (),
 ) -> GateProtectionResult:
-    """Verify the candidate's gate definitions against the base SHA (GT-1).
+    """Verify the candidate's gate definitions against the base SHA.
 
     Two deterministic sources feed one verdict:
 

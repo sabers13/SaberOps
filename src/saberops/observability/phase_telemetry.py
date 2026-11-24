@@ -1,9 +1,9 @@
-"""Production phase telemetry (ROADMAP §11 wall-clock decomposition).
+"""Production phase telemetry: wall-clock decomposition.
 
 This module is observational ONLY.  It persists the canonical phase
 vocabulary into a dedicated, additive ``phase_observations`` table so the
-runtime can answer the supervisor question: ``for run_id, which ROADMAP §11
-phases were MEASURED, which were UNKNOWN, and which were NOT_APPLICABLE?``
+runtime can answer the supervisor question: ``for run_id, which phases
+were MEASURED, which were UNKNOWN, and which were NOT_APPLICABLE?``
 
 The recorder never invents a duration.  When the runtime cannot honestly
 separate a phase (e.g. the kernel-enforced sandbox setup is fused with

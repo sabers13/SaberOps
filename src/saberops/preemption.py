@@ -1,10 +1,10 @@
-"""Durable quota preemption and resume (Step 001).
+"""Durable quota preemption and resume.
 
 A durable JOB-owned run that suffers
 :attr:`WorkerInterruptionReason.QUOTA_EXHAUSTED
 <saberops.models.WorkerInterruptionReason.QUOTA_EXHAUSTED>` and then has no
 admitted candidate left in ANY role fallback group -- as determined by the
-accepted M2-4b admission policy and recorded as a ``no_eligible_candidate``
+accepted admission policy and recorded as a ``no_eligible_candidate``
 run event -- is preempted instead of failed:
 
 1. the current WIP is captured as a checkpoint commit (reusing the existing
@@ -27,7 +27,7 @@ A later scheduled re-dispatch constructs a NEW run anchored at the original
 job base; :func:`prepare_resume` restores the verified checkpoint plus the
 factual capsule through the new run's ordinary worker-checkpoint channel, so
 no orchestration, admission, posture, quota, lease, or review logic is
-bypassed: the resumed run passes the normal M2-4b guard and still requires
+bypassed: the resumed run passes the normal guard and still requires
 independent review plus owner acceptance before anything publishes.
 
 Bound: ``max_preemptions`` (default 5).  At the limit the run AND the job go
@@ -85,14 +85,14 @@ from saberops.process import run_process
 #: before it goes terminally FAILED with ``PREEMPTION_LIMIT``.
 DEFAULT_MAX_PREEMPTIONS: int = 5
 
-#: R2 durable receipt: the factual "D8 owns this terminal outcome" decision,
+#: Durable receipt: the factual "preemption owns this terminal outcome" decision,
 #: written BEFORE any preemption side effect (checkpoint/ref/capsule/intent).
 PREPARATION_EVENT = "preemption_preparing"
 #: Durable prepared-artifact record (the crash-replay intent).
 INTENT_EVENT = "preemption_committed"
 #: Terminal run event for a completed park.
 RUN_PREEMPTED_EVENT = "run_preempted"
-#: H6: durable intent that a stopped attempt was stopped for an owner/planner
+#: Durable intent that a stopped attempt was stopped for an owner/planner
 #: redirect, not for quota exhaustion.  Recovery reads it so a crash between
 #: the stop and the job requeue finishes the same deliberate redirect.
 REDIRECT_REQUESTED_EVENT = "redirect_requested"
@@ -128,7 +128,7 @@ def _interruption_label(interruption: str) -> str:
 
 @dataclass(frozen=True)
 class PreemptionReadiness:
-    """Whether a run currently qualifies for D8 preemption, and why."""
+    """Whether a run currently qualifies for preemption, and why."""
 
     eligible: bool
     detail: str
@@ -168,7 +168,7 @@ class ResumePreparation:
 
 @dataclass(frozen=True)
 class PreemptionDecision:
-    """Bounded, factual receipt that D8 owns a run's terminal outcome (R2).
+    """Bounded, factual receipt proving preemption owns a run's terminal outcome.
 
     Written *before* any preemption side effect so a crash at any later
     boundary is recognisable from durable state alone.  It carries only facts
@@ -262,9 +262,9 @@ class PreparedArtifacts:
 
 @dataclass(frozen=True)
 class PreemptionTransaction:
-    """Classified durable state of one run's D8 transaction.
+    """Classified durable state of one run's transaction.
 
-    ``state`` is one of ``none`` (no D8 receipt), ``preparing`` (a factual
+    ``state`` is one of ``none`` (no receipt), ``preparing`` (a factual
     decision exists, side effects incomplete), ``prepared`` (verified
     artifacts exist), or ``blocked`` (a receipt exists but does not verify --
     fail closed, never fabricate a different transaction from it).
@@ -286,7 +286,7 @@ def build_preemption_decision(
     owner_generation: int | None = None,
     decision_ref: str | None = None,
 ) -> PreemptionDecision:
-    """Assemble the factual D8 decision receipt from durable state."""
+    """Assemble the factual decision receipt from durable state."""
     attempt_ids: tuple[str, ...] = ()
     attempt_states: tuple[str, ...] = ()
     try:
@@ -320,7 +320,7 @@ def _decision_payload(db: Any, run_id: str, job_id: str) -> dict[str, Any] | Non
 
 
 def record_preparation_decision(db: Any, decision: PreemptionDecision) -> bool:
-    """Persist the D8 decision receipt exactly once (idempotent).
+    """Persist the decision receipt exactly once (idempotent).
 
     Returns True only when this call wrote the receipt.  Called *before* any
     checkpoint, capsule, ref or intent side effect so that a crash between the
@@ -372,7 +372,7 @@ def verify_prepared_artifacts(
     * ``checkpoint_sha`` is a well-formed, existing commit in the job repo;
     * ``checkpoint_ref`` is a well-formed engine checkpoint ref for this job
       and that ref is *currently* a direct anchor resolving to exactly that
-      SHA (R3 create-only/read-only discipline; a symbolic or colliding ref is
+      SHA (create-only/read-only discipline; a symbolic or colliding ref is
       refused rather than dereferenced);
     * ``handoff_id`` resolves to a real handoff row belonging to this run;
     * ``preemptions_next`` (when present) equals the expected pre-preemption
@@ -499,7 +499,7 @@ def authenticate_decision(
     * the exact durable execution-owner generation.
 
     All of it must hold, or the caller must fail closed: a plausible receipt is
-    not proof that D8 took this job's terminal outcome.
+    not proof that preemption took this job's terminal outcome.
     """
     if decision.run_id != run_id or decision.job_id != job.job_id:
         return False, "decision_mismatched"
@@ -559,13 +559,13 @@ def authenticate_prepared_transaction(
     repo_path: str | Path,
     expected_preemptions_before: int | None = None,
 ) -> _AuthenticatedTransaction:
-    """Authenticate a durable D8 transaction end to end (read-only).
+    """Authenticate a durable transaction end to end (read-only).
 
     Requires **both** an authentic ``preemption_preparing`` decision receipt
     and, when a ``preemption_committed`` intent exists, artifacts that verify
     and belong to that same authenticated transaction.  A legacy/unbound intent
     (no decision, or a decision that cannot be authenticated) is rejected here:
-    a valid SHA + capsule is not proof that D8 took this job's terminal
+    a valid SHA + capsule is not proof that preemption took this job's terminal
     outcome, so it must never be promoted to authority.
     """
     repo = Path(repo_path).resolve() if not isinstance(repo_path, Path) else repo_path
@@ -618,9 +618,9 @@ def classify_preemption_transaction(
     job: Job,
     repo_path: str | Path,
 ) -> PreemptionTransaction:
-    """Classify one run/job's durable D8 transaction state (read-only).
+    """Classify one run/job's durable transaction state (read-only).
 
-    Never infers a D8 decision from quota history or WIP alone, and never
+    Never infers a decision from quota history or WIP alone, and never
     promotes an unauthenticated legacy receipt: a transaction is ``prepared``
     only when an authentic bound decision **and** matching verified artifacts
     exist, ``preparing`` only when an authentic bound decision exists, and
@@ -637,7 +637,7 @@ def classify_preemption_transaction(
             state="preparing", detail=txn.detail, decision=txn.decision, job=job,
         )
     if txn.detail == "decision_missing":
-        # No decision receipt and no intent: an ordinary run with no D8
+        # No decision receipt and no intent: an ordinary run with no
         # transaction at all (not a promoted legacy intent).
         return PreemptionTransaction(state="none", detail="no_transaction", job=job)
     return PreemptionTransaction(
@@ -656,11 +656,11 @@ def finish_interrupted_preemption(
     now: datetime | None = None,
     max_preemptions: int = DEFAULT_MAX_PREEMPTIONS,
 ) -> PreemptionOutcome:
-    """Continue an already-durable D8 transaction through production recovery.
+    """Continue an already-durable transaction through production recovery.
 
     This is the narrow entry point used by the scheduler/supervisor restart
     path.  It performs **no** new routing decision, no provider/model call and
-    no admission: it only re-verifies durable evidence (genuine quota, F1
+    no admission: it only re-verifies durable evidence (genuine quota,
     no-eligible, exact RUNNING job/run, verification of the recorded artifacts)
     and then finishes the fenced terminalization, exact-generation requeue and
     settlement.  A caller that has not itself proven the predecessor dead and
@@ -790,7 +790,7 @@ def has_genuine_quota_signal(db: Any, run_id: str) -> bool:
 def has_no_eligible_evidence(db: Any, run_id: str) -> bool:
     """True iff the run's terminal outcome is quota-only exhaustion.
 
-    Deliberately conservative ("fail closed"): D8 may preempt only when the
+    Deliberately conservative ("fail closed"): preemption may preempt only when the
     run ended with genuine quota exhaustion and **no admitted fallback**.  The
     durable attempt and event channels carry no chain, tier, or generation
     identity, so a non-quota failure can never be proven to belong to an older
@@ -803,7 +803,7 @@ def has_no_eligible_evidence(db: Any, run_id: str) -> bool:
     *succeeded* (for example an earlier plan package) is not such a failure and
     does not by itself contradict a later, genuinely quota-only chain.
 
-    Only these durable shapes, all produced by the run's own M2-4b ladder
+    Only these durable shapes, all produced by the run's own ladder
     (never re-derived here by re-running admission), qualify:
 
     1. a ``no_eligible_candidate`` event alongside no admitted non-quota
@@ -1250,7 +1250,7 @@ def _terminalize_preempted(
     When an exact execution-owner token is supplied the transition uses
     :meth:`Database.terminalize_preemption_fenced`, which additionally refuses
     when any attempt is still RUNNING/PENDING (a live worker is not a
-    recoverable D8 crash) or when the generation changed.  Without a token the
+    recoverable crash) or when the generation changed. Without a token the
     existing guarded read-check + update path is kept, so standalone/in-process
     runs behave exactly as before -- except that ``require_fenced`` callers
     (every crash-recovery pass) must supply a token and never take the
@@ -1409,13 +1409,13 @@ def complete_preemption(
     interruption: str = "quota",
     now: datetime | None = None,
 ) -> PreemptionOutcome:
-    """Execute (or idempotently complete) the D8 preemption protocol.
+    """Execute (or idempotently complete) the preemption protocol.
 
     Ordered for crash safety: durable decision receipt ->
     checkpoint/anchor -> resume capsule -> anchor ref -> verified intent ->
     fenced run terminalization -> exact-generation job requeue -> owner-aware
     settlement of the old run's capacity.  A crash before terminalization
-    leaves an exact, recognisable D8 transaction (verified artifacts, or the
+    leaves an exact, recognisable transaction (verified artifacts, or the
     decision receipt) that the scheduler/supervisor restart path finishes;
     a crash after terminalization is completed idempotently.  Never raises for
     expected failure modes: declines with ``owned=False`` instead, so the
@@ -1429,11 +1429,11 @@ def complete_preemption(
     from saberops.capacity.ledger import release_terminal_debt
     from saberops.jobs import store
 
-    # F17: the same checkpoint/anchor/capsule/requeue protocol parks work for a
+    # The same checkpoint/anchor/capsule/requeue protocol parks work for a
     # pause as for quota exhaustion, but a pause is the owner's stop, not a
     # resource failure: it must not consume the bounded preemption budget and
     # its job waits under PAUSED until the owner confirms a resume.
-    # H6: a redirect parks the same way but is a deliberate correction, so it
+    # A redirect parks the same way but is a deliberate correction, so it
     # also skips the budget and hands the job back under REDIRECTED for the
     # ordinary scheduler to continue with the pending note.
     pause = interruption == "pause"
@@ -1567,7 +1567,7 @@ def complete_preemption(
                 return PreemptionOutcome(
                     owned=False, detail="recovery_without_decision", job=job
                 )
-        # R2: record the factual D8 decision BEFORE any side effect so a crash
+        # Record the factual decision BEFORE any side effect so a crash
         # at (or between) the checkpoint/capsule/ref/intent boundaries leaves
         # an exact, recognisable transaction for restart recovery.
         decision = build_preemption_decision(
@@ -1705,7 +1705,7 @@ def complete_preemption(
         # the run is conclusively terminal, so still settle its reservation
         # through the same owner-aware path, but never touch a job we no
         # longer own.  If settlement fails here, the run is terminal and has
-        # a D8 receipt, so the durable settlement scan completes it later.
+        # a receipt, so the durable settlement scan completes it later.
         try:
             release_terminal_debt(db, run_id=run_id, job_id=job.job_id, now=moment)
         except Exception:
@@ -1723,8 +1723,8 @@ def complete_preemption(
         )
     # The run is terminal and the job is requeued; settle the old run's
     # reserved capacity exactly once.  A failure here is not fatal: the old
-    # run's D8 receipt makes it discoverable by the durable settlement scan,
-    # which is why R1 no longer depends on this call succeeding.
+    # run's receipt makes it discoverable by the durable settlement scan,
+    # which is why the durable scan no longer depends on this call succeeding.
     try:
         release_terminal_debt(db, run_id=run_id, job_id=job.job_id, now=moment)
     except Exception:
@@ -1760,7 +1760,7 @@ def prepare_resume(
     the verified SHA plus the capsule id, so the run's ordinary
     continuation channel restores the worktree at the checkpoint and the
     factual capsule flows into dispatch evidence -- through the normal
-    M2-4b admission guard, never around it.
+    admission guard, never around it.
 
     The caller must have created the new run row first (the scheduler
     launcher does): checkpoint and event writes reference it by foreign

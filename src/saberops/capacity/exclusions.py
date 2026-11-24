@@ -1,4 +1,4 @@
-"""Pure exclusion rules with an injectable clock (M2-1 A).
+"""Pure exclusion rules with an injectable clock.
 
 Exclusion dict keys (as stored in ``capacity_exclusions``):
 ``id, pool_id, window_id, model_scope, reason, until, until_confidence,

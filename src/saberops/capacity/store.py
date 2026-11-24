@@ -1,4 +1,4 @@
-"""Owner-DB exclusion + probe-run store (M2-1 A).
+"""Owner-DB exclusion + probe-run store.
 
 Storage lives in the owner DB (``db.owner_db.db_path``). Connections mirror
 the pragmas of ``Database._get_connection``. Tables are created with
@@ -31,7 +31,7 @@ else:  # pragma: no cover - typing only
 
 @contextmanager
 def owner_connection(db: Database) -> Iterator[sqlite3.Connection]:
-    """Open the owner DB with the same pragmas and D7 timeout as the class.
+    """Open the owner DB with the same pragmas and timeout as the class.
 
     The busy timeout is the shared :data:`saberops.sqlite_policy.BUSY_TIMEOUT_MS`
     rather than a second, weaker 5 s value, so this store cannot

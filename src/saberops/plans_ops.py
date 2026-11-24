@@ -1,7 +1,7 @@
 """Owner plan-registry and billing-posture operations (service layer).
 
 Single service-layer authority for the ``orch plans`` and ``orch
-posture`` commands, and the seam the future MCP server will call.
+posture`` commands, and the seam the MCP server calls.
 Every function here is the ONE service-layer function for its
 operation; the CLI is a thin wrapper that only parses arguments and
 renders output.

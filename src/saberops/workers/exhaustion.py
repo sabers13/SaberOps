@@ -1,17 +1,17 @@
-"""Plan-exhaustion classification for native CLI worker adapters (T-004).
+"""Plan-exhaustion classification for native CLI worker adapters.
 
-Implements the R-001 classification table (``.orch/R-001/findings.md``):
+Implements the classification table:
 one pure classifier per CLI mapping captured CLI output to
 ``QUOTA_EXHAUSTED`` (do not retry until reset) | ``RATE_LIMITED``
 (short backoff, keep today's retry behaviour) | ``OTHER`` (neither).
 
-Conventions (per R-001): match STRUCTURED fields first, prose second.
+Conventions: match STRUCTURED fields first, prose second.
 Prose dates without a timezone are parsed conservatively: when the
 reset moment is ambiguous the classifier returns ``reset_at=None``
 rather than guessing.  Auth / billing errors are never quota.
 
 Confidence: ``VERIFIED`` rules are quoted against real CLI captures in
-R-001; ``PROVISIONAL`` rules (Antigravity failure text) have no
+``PROVISIONAL`` rules (Antigravity failure text) have no
 verified exact signal yet and are marked as such in code.
 """
 
@@ -52,7 +52,7 @@ class ExhaustionClassification:
 
     ``reset_at`` is an aware UTC datetime when the signal carries a reset
     moment (EXACT/PARSED/HINT), else ``None``.  ``rule`` names the exact
-    R-001 table row that fired (for durable evidence); ``confidence``
+    table row that fired (for durable evidence); ``confidence``
     is ``VERIFIED`` or ``PROVISIONAL``.  ``window`` is
     ``5h|daily|weekly|monthly`` or ``None`` (unknown -> ALL);
     ``model_scope`` is a model substring or ``None``; ``reset_confidence``
@@ -107,7 +107,7 @@ _BILLING_RE = re.compile(
 )
 
 # NOTE: ``enforced_spend_limit_reached`` doubles as the Claude spend-cap
-# marker (R-001: spend-cap 429 has no retry-after and needs human action,
+# marker (spend-cap 429 has no retry-after and needs human action,
 # so it is OTHER, not self-resetting quota).  It lives in the billing
 # guard so it can never become QUOTA_EXHAUSTED via prose matching.
 
@@ -180,7 +180,7 @@ def _parse_codex_hint_date(
 def classify_codex(
     stdout: str, stderr: str = "", *, now: datetime | None = None, tz: Any | None = None
 ) -> ExhaustionClassification:
-    """Classify Codex ``exec --json`` output per the R-001 table (VERIFIED).
+    """Classify Codex ``exec --json`` output per the table (VERIFIED).
 
     Trap handled: ``Interrupted`` turns emit NO terminal event, and
     text-only errors carry no JSON event, so a stream without a
@@ -367,7 +367,7 @@ def _parse_claude_bare_clock_hint(
 def _claude_window_and_scope(
     raw: str, rate_limit_type: str | None = None
 ) -> tuple[str | None, str | None]:
-    """Window/model-scope from rateLimitType then prose (M2-1 B)."""
+    """Window/model-scope from rateLimitType then prose."""
     rlt = (rate_limit_type or "").strip().lower()
     if rlt:
         scope: str | None = None
@@ -407,12 +407,12 @@ def _claude_window_and_scope(
 def classify_claude(
     stdout: str, stderr: str = "", *, now: datetime | None = None, tz: Any | None = None
 ) -> ExhaustionClassification:
-    """Classify Claude ``stream-json`` output per the R-001 table (VERIFIED).
+    """Classify Claude ``stream-json`` output per the table (VERIFIED).
 
     Trap handled: a plan limit arrives as ``type=="result"`` with
     ``subtype=="success"`` AND ``is_error==true`` -- a classifier that
     treats ``success`` as success misses 100% of real limit events
-    (R-001, rhei #451).  Reset extraction prefers structured
+    (rhei #451).  Reset extraction prefers structured
     ``resetsAt`` epoch seconds / ``resets_at`` ISO-8601 (EXACT); zoned or
     UTC-dated prose is PARSED; a bare clock (``resets 3:45pm``) is a HINT
     (next host-local occurrence, injectable ``tz``).
@@ -588,7 +588,7 @@ _OPENCODE_AUTH_RE = re.compile(
 
 
 def _window_from_text(text: str) -> str | None:
-    """Window from vendor wording (M2-1 B); None when absent (=> ALL)."""
+    """Window from vendor wording; None when absent (=> ALL)."""
     low = text.lower()
     if re.search(r"5-hour|five-hour|five hour", low):
         return "5h"
@@ -604,7 +604,7 @@ def _window_from_text(text: str) -> str | None:
 def classify_opencode(
     stdout: str, stderr: str = "", *, now: datetime | None = None
 ) -> ExhaustionClassification:
-    """Classify OpenCode ``run --format json`` output per R-001 (VERIFIED).
+    """Classify OpenCode ``run --format json`` output per the table (VERIFIED).
 
     Trap handled: ``step_finish`` may never arrive (the run loop can
     strand the final event), so classification keys ONLY on the
@@ -730,12 +730,12 @@ _AGY_ERROR_LINE_RE = re.compile(r"AGY_ERROR:", re.IGNORECASE)
 def parse_antigravity_usage(usage_json: str) -> datetime | None:
     """Read the reset clock from ``agy -p /usage --output-format json``.
 
-    The failure signal itself carries no reset time (R-001); the
+    The failure signal itself carries no reset time; the
     zero-cost ``/usage`` command exposes per-bucket ``reset_time``
     (ISO-8601 UTC) + ``remaining_fraction``.  Returns the reset of the
     most-exhausted bucket (ties break to the earliest reset), or
     ``None`` when the payload is unparseable.  Shape VERIFIED by two
-    independent captures (R-001).
+    independent captures.
     """
     try:
         payload = json.loads(usage_json)
@@ -782,7 +782,7 @@ def classify_antigravity(
     Quota-exhausted turn: terminal ``{event:result,
     result:{status:"ERROR", error:"<text>"}}`` and/or an ``AGY_ERROR:``
     stderr line naming ``RESOURCE_EXHAUSTED`` / 429 / exhausted quota
-    (INFERRED, single implementation source per R-001).  The failure
+    (INFERRED, single implementation source).  The failure
     signal carries no reset: pass the zero-cost ``/usage`` JSON via
     ``usage_json`` to resolve the reset clock (see
     :func:`parse_antigravity_usage`).
@@ -909,7 +909,7 @@ def record_exhaustion(
     pool_policies: dict[str, QuotaPoolPolicy] | None = None,
     pools: list[str] | None = None,
 ) -> QuotaState:
-    """Persist exhaustion evidence and upsert pool exclusions (M2-1 B).
+    """Persist exhaustion evidence and upsert pool exclusions.
 
     Writes the quota observation (audit) and then upserts an exclusion for
     every pool the candidate draws (D). It no longer calls

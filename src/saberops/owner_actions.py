@@ -26,7 +26,7 @@ primitive that makes both operations safe for real dogfooding:
   UNCERTAIN; UNKNOWN liveness fails closed for duplicate launch; an
   UNCERTAIN Accept is never replayed automatically.
 * Owner authority -- claiming or executing an owner action requires owner
-  session authority (M4).  :func:`require_owner_action_authority` fails
+  session authority.  :func:`require_owner_action_authority` fails
   closed when the session authority marker says ``worker`` (or carries an
   unknown value), and refuses a claimed transport origin that is not
   loopback, extending the local Web Host allowlist into the durable-action

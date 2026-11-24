@@ -1,4 +1,4 @@
-"""Zero-inference usage probes with persisted rate limiting (M2-1 C)."""
+"""Zero-inference usage probes with persisted rate limiting."""
 
 from __future__ import annotations
 
@@ -230,8 +230,8 @@ def _canonical_connection_for_provider(provider: str) -> str | None:
     A probe reads the single account signed into the local CLI, so its windows
     describe exactly that account's quota.  Discovered bindings name that
     account as ``discovered-pool:<connection id>`` while packaged plans name
-    the provider route; both identity spellings must receive the same evidence
-    (N2).  More than one account connection for a provider is ambiguous -- the
+    the provider route; both identity spellings must receive the same evidence.
+    More than one account connection for a provider is ambiguous -- the
     probe cannot prove which one it read -- so no alias is invented.
     """
     wanted = provider.strip().lower()
@@ -302,7 +302,7 @@ def discovered_pool_aliases(harness: str) -> list[str]:
     (see :func:`saberops.control_plane.binding_store.materialize_discovered_binding`),
     while packaged plans name the provider route.  The probe therefore records
     its windows under both identities so a fresh reading satisfies the
-    binding's pool without an owner-written row (N2).  No alias is invented
+    binding's pool without an owner-written row. No alias is invented
     when the provider has no single canonical account connection.
     """
     provider = HARNESS_PROVIDER.get(harness, harness)
@@ -341,7 +341,7 @@ def handle_probe_result(
     pools = pools_for_probe(harness, policies)
     # Ledger evidence is also recorded against the canonical account
     # connection's discovered pool: that is the same account the probe read and
-    # the identity a discovered binding names (N2).  Exclusions and red-line
+    # the identity a discovered binding names. Exclusions and red-line
     # rows keep their existing pool scope.
     evidence_pools = [*pools]
     for alias in discovered_pool_aliases(harness):

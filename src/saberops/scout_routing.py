@@ -1,15 +1,15 @@
-"""Cheap-model default for scout jobs (F27, folded into effort by H8).
+"""Cheap-model default for scout jobs (folded into effort).
 
-A scout job (F19) is read-only and usually a search, grep or audit question, so
+A scout job is read-only and usually a search, grep or audit question, so
 the cheapest plan model of an available subscription is the right default.  The
 owner's build route remains the only source of routes: this module never adds a
 candidate.  It only chooses the order among the candidates the owner already
 allows, keeping every non-cheap candidate as a fallback when the cheap one
 cannot be admitted.
 
-H8 folded the scout-specific cheap default into the ordinary effort rule:
-``effort: low`` on any job prefers each subscription's cheapest plan model, and
-a scout with no stated effort is normalised to ``low`` when the job is created.
+The ordinary effort rule carries the scout default: ``effort: low`` on any
+job prefers each subscription's cheapest plan model, and a scout with no
+stated effort is normalised to ``low`` when the job is created.
 A heavy job (``high``/``xhigh`` effort, or a size ``L`` investigation) keeps
 the ordinary build route.
 
@@ -83,7 +83,7 @@ def is_heavy_scout(requirements: JobRequirements | None) -> bool:
 def cheap_default_applies(
     requirements: JobRequirements | None, *, effort: str | None = None
 ) -> bool:
-    """True when the job states the cheap default, ``effort: low`` (H8).
+    """True when the job states the cheap default, ``effort: low``.
 
     The same rule serves every job, not just scouts: a scout with no stated
     effort is normalised to ``low`` when it is created, so its cheapest-model
@@ -186,7 +186,7 @@ def scout_candidate_view(
     available.  An explicit ``provider/model`` route narrows the view to that
     candidate (falling back to the cheap default if it is no longer routed).
     A job that does not state ``effort: low``, or a heavy one, keeps the
-    ordinary build route (H8).
+    ordinary build route.
     """
     original = tuple(tuple(group) for group in groups)
     original_pacing = tuple(int(value) for value in pacing)
@@ -244,7 +244,7 @@ def order_candidates_for_scout(
     Every candidate is retained: a cheap model that cannot be admitted falls
     through to the next one.  ``effort`` carries the frozen run config's value
     for a direct run that has no job requirements record; a run whose effort is
-    not ``low`` keeps the ordinary build route (H8).
+    not ``low`` keeps the ordinary build route.
     """
     if is_heavy_scout(requirements):
         return list(candidates)

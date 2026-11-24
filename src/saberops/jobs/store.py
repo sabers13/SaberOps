@@ -1,10 +1,10 @@
-"""Job store (M2-3 sections C + D): owner DB, own DDL, CAS state machine.
+"""Job store: owner DB, own DDL, CAS state machine.
 
 Storage lives in the owner DB because pools are global across repos.
 Every function opens connections through ``db.owner_db._get_connection()``
 (the connection helper from db.py: same pragmas, read-only mode
 honoured) and runs ``ensure_tables`` first. ``db.py`` itself is unchanged
-and ``DB_SCHEMA_VERSION`` is untouched (C4).
+and ``DB_SCHEMA_VERSION`` is untouched.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ MAX_STEERING_NOTE_CHARS = 4000
 #: notes wait for the following attempt boundary instead of splitting a note.
 MAX_NOTES_PER_DELIVERY = 5
 
-#: Job-event kind marking the one automatic continue note (F14).  Its presence
+#: Job-event kind marking the one automatic continue note. Its presence
 #: is the durable proof that this job already spent its single nudge.
 NUDGE_EVENT_KIND = "nudged"
 
@@ -162,11 +162,11 @@ def ensure_tables(db: Any) -> None:
 
 
 def _ensure_steering_source_column(conn: sqlite3.Connection) -> None:
-    """Add ``source`` to a steering-notes table created before F26.
+    """Add ``source`` to an older steering-notes table.
 
     Existing rows are owner notes, which is exactly the column default.  A
     note must say who wrote it without changing delivery semantics; advisor
-    advice recorded before phase 1.1 keeps its ``advisor`` label.
+    advice stored under an older label keeps its ``advisor`` source.
     """
     columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(job_steering_notes)")}
     if "source" not in columns:
@@ -176,7 +176,7 @@ def _ensure_steering_source_column(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_steering_discarded_column(conn: sqlite3.Connection) -> None:
-    """Add ``discarded_at`` to a steering-notes table created before H6.
+    """Add ``discarded_at`` to an older steering-notes table.
 
     A note that no longer applies is discarded explicitly, never silently
     dropped: the column keeps the reason visible while the pending reads stop
@@ -188,10 +188,10 @@ def _ensure_steering_discarded_column(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_depends_on_column(conn: sqlite3.Connection) -> None:
-    """Add ``depends_on_json`` to a ``jobs`` table created before F8.
+    """Add ``depends_on_json`` to an older ``jobs`` table.
 
     ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, and stores
-    created by an earlier version keep dispatching, so the F8 column is added
+    created by an earlier version keep dispatching, so the column is added
     in place with the same default a fresh store gets.  Jobs written before
     this column existed carry no dependencies.
     """
@@ -203,7 +203,7 @@ def _ensure_depends_on_column(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_kind_column(conn: sqlite3.Connection) -> None:
-    """Add ``kind`` to a ``jobs`` table created before F19.
+    """Add ``kind`` to an older ``jobs`` table.
 
     ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a store
     written by an earlier version gains the column in place.  Every existing
@@ -255,7 +255,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
     resume_raw = row["resume_from_json"]
     resume = ResumeFrom.from_dict(json.loads(str(resume_raw))) if resume_raw else None
     waiting_raw = row["waiting_reason"]
-    # A read-only connection can read a store created before F8, whose jobs
+    # A read-only connection can read a store created before, whose jobs
     # table has no ``depends_on_json``; those jobs carry no dependencies.
     depends_raw = row["depends_on_json"] if "depends_on_json" in row.keys() else None
     depends_on = tuple(json.loads(str(depends_raw))) if depends_raw else ()
@@ -429,7 +429,7 @@ def append_run_to_job(
 ) -> Job:
     """Append an already-created run to a job's chain without changing its state.
 
-    Candidate refresh (E6) creates a new run for the same job.  Linking that run
+    Candidate refresh creates a new run for the same job. Linking that run
     here keeps ``job_is_accepted`` and the rendered plan ledger following the
     refreshed candidate instead of the pre-refresh run.  Idempotent.
     """
@@ -470,7 +470,7 @@ def resume_transition(
     note_id: int | None = None,
     now: datetime | None = None,
 ) -> tuple[Job, bool]:
-    """FAILED -> RUNNING with one successor run (H7 resume).
+    """FAILED -> RUNNING with one successor run (resume).
 
     The owner or planner resumes a failed job from scratch or from its saved
     candidate; the successor is already created by the service layer, so this
@@ -652,7 +652,7 @@ def append_event(
     *,
     now: datetime | None = None,
 ) -> None:
-    """Append one durable job event (used to index a scout report, F19)."""
+    """Append one durable job event (used to index a scout report)."""
     ensure_tables(db)
     at = _utcnow_iso(now)
     with _owner_conn(db) as conn:
@@ -1096,10 +1096,10 @@ def set_waiting(
     details: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> Job:
-    """QUEUED -> QUEUED: reason change only (M2-4b pacing).
+    """QUEUED -> QUEUED: reason change only (pacing).
 
-    ``details`` is durable audit evidence for the reason (F8 records which
-    dependencies block a job); it never changes the transition itself.
+    ``details`` is durable audit evidence for the reason (the records name
+    which dependencies block a job); it never changes the transition itself.
     """
     want = reason if isinstance(reason, WaitingReason) else WaitingReason(str(reason))
     current = get_job(db, job_id)
@@ -1139,7 +1139,7 @@ def requeue(
     not_before: str | None = None,
     now: datetime | None = None,
 ) -> Job:
-    """RUNNING -> QUEUED: park work; PREEMPTED bumps ``preemptions`` (M2-5)."""
+    """RUNNING -> QUEUED: park work; PREEMPTED bumps ``preemptions``."""
     want = reason if isinstance(reason, WaitingReason) else WaitingReason(str(reason))
     ensure_tables(db)
     at = _utcnow_iso(now)

@@ -72,7 +72,7 @@ class RunOperationError(ValueError):
         self.detail = detail
 
 
-#: The two ways to resume one failed job (H7).
+#: The two ways to resume one failed job.
 RESUME_FROM_SCRATCH = "scratch"
 RESUME_FROM_LAST_CANDIDATE = "last_candidate"
 RESUME_FROM_VALUES = (RESUME_FROM_SCRATCH, RESUME_FROM_LAST_CANDIDATE)
@@ -383,7 +383,7 @@ class OrchestratorService:
         return can_reject_candidate(self.db, run_id)
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
-        """Guardedly retire this run's clean attempt worktrees (Step 008 / GS-1).
+        """Guardedly retire this run's clean attempt worktrees.
 
         Delegates to the single guarded storage-lifecycle implementation so the
         compatibility route and ``orch gc`` enforce identical protections and no
@@ -424,7 +424,7 @@ class OrchestratorService:
     def run_routing_role(self, run_id: str) -> str:
         """Return the routing role of the newest ``tier_candidates_resolved`` event.
 
-        A run with no such role (all runs before R-002) reports
+        A run with no such role (an older run) reports
         ``"LEGACY:<tier>"``. A retired role name stored before ADR-0005 §3
         resolves to ``BUILD``. Read-only; no DB schema change.
         """
@@ -780,7 +780,7 @@ class OrchestratorService:
             role = self.run_routing_role(run_id)
             strong_start = self.run_strong_start(run_id)
             if role.startswith("LEGACY:"):
-                # A run from before R-002: legacy tier labels all resolve to
+                # A run carrying legacy tier labels: they all resolve to
                 # the build route; T3 asks for its stronger-model setting.
                 from saberops.models import Tier as _Tier
 
@@ -863,7 +863,7 @@ class OrchestratorService:
     ) -> dict[str, Any]:
         """Resume one failed job: from scratch or from its saved candidate.
 
-        The one owner/planner recovery verb (H7).  It maps onto the existing
+        The one owner/planner recovery verb. It maps onto the existing
         retry and continue paths, links the successor run back to the job so
         the job's state follows it, and refuses with a reason when neither
         path applies.  ``worker_binding`` is the folded-in try-worker option

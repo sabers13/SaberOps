@@ -41,7 +41,7 @@ def refresh_candidate(service: OrchestratorService, run_id: str) -> dict[str, An
     accepts the refreshed candidate through the ordinary acceptance path.
     """
     db = service.db
-    # F17: a refresh creates a new run (a new worker).  While the work gate is
+    # A refresh creates a new run (a new worker).  While the work gate is
     # closed -- owner pause, no planning session, or an away session that ran
     # out -- nothing new starts, so the refresh is refused with the gate reason
     # instead of quietly spending usage.
@@ -104,7 +104,7 @@ def refresh_candidate(service: OrchestratorService, run_id: str) -> dict[str, An
         review_risk_decision_json=None,
     )
     db.create_run(run)
-    # P3: link the refreshed run into its job's chain so acceptance and the
+    # Link the refreshed run into its job's chain so acceptance and the
     # rendered ledger follow the refreshed candidate, not the pre-refresh run.
     try:
         owner_job = store.find_job_for_run(db, run_id)

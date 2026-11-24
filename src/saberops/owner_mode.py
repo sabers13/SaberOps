@@ -307,7 +307,7 @@ _ACTION_POLICY_FIELD: Final[dict[ModeAction, str]] = {
 #: Actions a live code path actually consults the decision for today.  The
 #: others (publish, safe cleanup) are recorded intent only and must be
 #: labelled advisory until their own lanes wire them.  Acceptance is enforced
-#: by the F15 auto-accept pass (:mod:`saberops.auto_accept`).
+#: by the auto-accept pass (:mod:`saberops.auto_accept`).
 ENFORCED_ACTIONS: Final[frozenset[ModeAction]] = frozenset(
     {
         ModeAction.DISPATCH,
@@ -331,10 +331,9 @@ class OwnerModeSettings:
     set_by: str | None
     source: str  # "owner" when a config file was read, else "package_default"
     source_path: str | None
-    #: F17: away-mode job budget for this session; ``None`` means "no bound".
+    #: Away-mode job budget for this session; ``None`` means "no bound".
     max_jobs: int | None = None
-    #: Technical host capability, kept here because the authority document
-    #: that used to hold it is gone (ADR-0082).
+    #: Technical host capability that governs host access (ADR-0082).
     host_access: HostAccessMode = HostAccessMode.GOVERNED
     #: A stored grant narrower than the mode ceiling (a migrated store).
     #: ``None`` means the mode's full ceiling.
@@ -348,7 +347,7 @@ class OwnerModeSettings:
 
         The owner decision (2026-11-19) is that away never runs unbounded: it
         needs an end time, a job count, or both.  A document written before
-        F17 therefore loads as *unbounded* and the runtime gate refuses to
+        this rule therefore loads as *unbounded* and the runtime gate refuses to
         start work rather than silently treating it as bounded.
         """
         return self.until is not None or self.max_jobs is not None
@@ -761,7 +760,7 @@ def set_owner_mode(
     ``until`` and ``max_jobs`` are only valid with ``away``: an end time or job
     budget on an attended mode has no defined meaning, so it fails closed
     instead of being silently ignored.  An ``away`` selection must carry at
-    least one bound (F17); the owner decision is that away never runs without a
+    least one bound; the owner decision is that away never runs without a
     way to stop it.
 
     An explicit selection applies that mode's ceiling.  A store migrated from

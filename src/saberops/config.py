@@ -75,17 +75,17 @@ class RunConfig:
     task: str
     target_repo: str
     routing_mode: RoutingMode = "auto"
-    #: Planner-recorded task judgement (H1), frozen at run creation.  Missing
+    #: Planner-recorded task judgement, frozen at run creation. Missing
     #: means routine: the ordinary build chain.  It maps to a route and a tier
     #: inside the engine, never to a caller-chosen provider/model/tier.
     difficulty: Difficulty = Difficulty.ROUTINE
-    #: Planner-recorded judgement (H20): the candidate this run produces is
+    #: Planner-recorded judgement: the candidate this run produces is
     #: consequential (a data migration, deleting data, auth and security, an
     #: irreversible operation, effects outside the work copy), so away and
     #: critical-only park it for the owner instead of auto-accepting.  Missing
     #: means ordinary.  The engine's own floor applies either way.
     consequential: bool = False
-    #: F19 job kind frozen at creation: ``"build"`` (a candidate) or
+    #: Job kind frozen at creation: ``"build"`` (a candidate) or
     #: ``"scout"`` (a read-only report, no gate/review/acceptance).
     kind: str = "build"
     manual_tier: Tier | None = None
@@ -141,7 +141,7 @@ class RunConfig:
     # binding-store change after admission MUST NOT alter an existing Run's
     # executable profile / account / backend / quota-pool identity.
     # ``None`` means no owner bindings were present at admission (the
-    # historical static/legacy path) or the value was not recorded for an
+    # static path) or the value was not recorded for an
     # older Run; a binding-bearing candidate then fails closed
     # (``NO_REGISTRY``) instead of loading ambient owner state.  Only
     # non-secret identity references are stored -- never credential values.
@@ -165,7 +165,7 @@ class RunConfig:
     accept_target_branch: str = ""
     # A linked repair run inherits a committed candidate, never a live provider session.
     continuation: dict[str, str] | None = None
-    # Legacy team-worker markers (no producer since phase 1.1).  Old stored
+    # Legacy team-worker markers. Old stored
     # configs still parse; the guards that refuse accepting, continuing or
     # refreshing an internal team worker read them so a legacy child is never
     # promoted to an owner-acceptable candidate.
@@ -383,7 +383,7 @@ def resolve_run_config(
     explicit_worker = worker_timeout is not None
     # Review is mandatory for a build run; the frozen guarantee is derived
     # from the owner switch and the run kind, never from an optional request
-    # bit.  ``review`` is a legacy alias kept for callers; it no longer
+    # bit.  ``review`` is a compatibility alias kept for callers; it never
     # disables anything.
     enabled = (
         review_enabled
@@ -478,7 +478,7 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         # A legacy payload predates the planner's difficulty; missing means
         # routine, exactly as at submit time.
         difficulty=coerce_difficulty(data.get("difficulty")),
-        # A legacy payload predates H20's marker; missing means ordinary.
+        # A legacy payload predates the marker; missing means ordinary.
         consequential=_validation_bool(data, "consequential", False),
         manual_tier=manual_tier if raw_mode == "manual" else None,
         max_auto_tier=max_auto_tier,
@@ -558,10 +558,10 @@ def _validation_bool(data: dict[str, Any], name: str, default: bool) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# CFG-1: central workflow configuration, owner approval and the audit ledger
+# Central workflow configuration, owner approval and the audit ledger
 # ---------------------------------------------------------------------------
 #
-# Step 013 (``CFG-1``) centralizes workflow settings that used to live as
+# This configuration centralizes workflow settings that would otherwise live as
 # scattered implicit constants: the 3x5 concurrency ceilings, the retention
 # defaults, and the owner-editable gate-slot ceilings.  Every change is an
 # explicit *proposal* that the owner *approves*; the approval is recorded in an
@@ -576,7 +576,7 @@ MAX_CONCURRENT_TASKS: Final[int] = 3
 MAX_WORKER_SESSIONS_PER_PROJECT: Final[int] = 5
 
 #: Gate-slot ceilings the central config validates the dynamic runtime against.
-#: The *runtime* counts are computed from live memory (D-0076); these remain the
+#: The *runtime* counts are computed from live memory; these remain the
 #: owner-editable upper bounds recorded in the ledger.
 DEFAULT_GATE_HEAVY_SLOTS: Final[int] = 1
 DEFAULT_MAX_LIGHT_SLOTS: Final[int] = 8

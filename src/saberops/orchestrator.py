@@ -359,7 +359,7 @@ def _record_quota_exhaustion_evidence(
     model_scope: str | None = None,
     reset_confidence: str | None = None,
 ) -> None:
-    """Persist plan-exhaustion quota evidence (M2-1: window/pool/model-aware).
+    """Persist plan-exhaustion quota evidence (window/pool/model-aware).
 
     Records the raw observation (freshness FRESH, remaining 0) plus one
     exclusion per pool the candidate draws via
@@ -995,7 +995,7 @@ class Orchestrator:
             # AMBIGUOUS_BUSY (or anything non-STALLED), this projection must
             # not claim the worker is stalled-for-termination.
             reason = f"output_quiet_{quiet_seconds:.0f}s"
-            # F14 (flagged): a live but idle job spends one bounded continue
+            # A live but idle job spends one bounded continue
             # note through the steering channel (ADR-0016) before the manager
             # raises attention.  The nudge is spent once per job; any later
             # stall -- or a disabled flag, a non-job run, a finished run or a
@@ -2184,7 +2184,7 @@ class Orchestrator:
                 db=self.db,
                 strong_start=strong_start_active,
             )
-            # H8: ``effort: low`` prefers the cheapest plan model of each
+            # ``effort: low`` prefers the cheapest plan model of each
             # subscription on any job; a direct scout run states low effort at
             # creation, so the scout default is this same rule.
             if (
@@ -2203,7 +2203,7 @@ class Orchestrator:
                     route=load_scout_route(config.target_repo),
                     effort=config.effort,
                 )
-            # F4: the provider a provider/model pin names, captured once.
+            # The provider a provider/model pin names, captured once.
             # A scheduler-dispatched job's admitted route arrives as this
             # pin; it is a preference, never a command to re-dispatch a
             # subscription that already ran out mid-run.
@@ -2785,7 +2785,7 @@ class Orchestrator:
                     # The next dispatch stays on the build route, now using
                     # its stronger-model setting.
                     continue
-                # F4: continue on another binding when the pinned route's
+                # Continue on another binding when the pinned route's
                 # subscription runs out.  A job dispatched by the scheduler
                 # carries its admitted route as a provider/model pin, which
                 # collapses the candidate ladder to that one entry.  When that
@@ -3466,14 +3466,14 @@ class Orchestrator:
                     rendered.prompt, steering_section
                 )
                 if config.kind == SCOUT_RUN_KIND:
-                    # F19: a scout answers with a report and changes nothing.
+                    # A scout answers with a report and changes nothing.
                     # The instruction is appended to the one rendered prompt so
                     # the saved attempt prompt is exactly what the worker saw.
                     task_for_worker_pre = append_steering_section(
                         task_for_worker_pre, SCOUT_PROMPT_SECTION
                     )
                 else:
-                    # F26 (ADR-0034): while the owner has an advisor route set,
+                    # While the owner has an advisor route set,
                     # the prompt names the exact command the worker runs from
                     # its own worktree to ask for advice on demand.  Off by
                     # default, so an unconfigured project sees no section.
@@ -3833,7 +3833,7 @@ class Orchestrator:
                     and auto_failover_start is None
                     and active_continuation_checkpoint is not None
                 ):
-                    # F4: an ordinary (non-autonomous) continuation after a
+                    # An ordinary (non-autonomous) continuation after a
                     # quota / binding interruption starts Attempt B at the
                     # interrupted attempt's checkpoint, not at the run base.
                     # Publication and acceptance require a durable proof that
@@ -4400,7 +4400,7 @@ class Orchestrator:
                 )
 
                 if config.kind == SCOUT_RUN_KIND:
-                    # F19: a scout run ends here.  Its deliverable is the
+                    # A scout run ends here.  Its deliverable is the
                     # report, so the ordinary candidate/gate/review/accept
                     # spine below does not apply; a worker failure still
                     # follows the ordinary failure path.
@@ -7681,7 +7681,7 @@ class Orchestrator:
                     attempt.worker_error = worker_res.error
                     attempt.completed_at = now
                     if worker_res.termination_reason:
-                        # Engine-initiated early stop (N9 idle-tree cutoff).
+                        # Engine-initiated early stop (idle-tree cutoff).
                         # Persist the typed reason on the attempt so the durable
                         # record says why it ended, not just the provider's
                         # "connection reset" symptom.
@@ -8102,11 +8102,11 @@ class Orchestrator:
         checks: list[CheckResult],
         reviews: list[ReviewResult],
     ) -> RunResult:
-        """End a scout run with a report and no candidate (F19).
+        """End a scout run with a report and no candidate.
 
         The worker ran read-only.  Any diff it produced is discarded from the
         scratch copy and recorded as a violation; the report is the worker's
-        final answer, saved into the run's E4 folder and indexed on the owning
+        final answer, saved into the run's folder and indexed on the owning
         job.  There is no gate, no review, no publication and no acceptance.
         """
         now = current_iso_timestamp()
@@ -8347,7 +8347,7 @@ def _run_configured_gate(
         from saberops.gate_scope import git_changed_files
         from saberops.verification_snapshot import fixed_snapshot, source_tree
 
-        # GT-1: the candidate must run the gate definitions trusted at its base.
+        # The candidate must run the gate definitions trusted at its base.
         # A changed check script, conftest.py or gate configuration never runs:
         # the engine refuses before the subprocess and surfaces the owner
         # question the GateProtectionResult carries.  An empty base is a legacy

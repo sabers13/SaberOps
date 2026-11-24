@@ -9,7 +9,7 @@ The trace recorder (:mod:`saberops.observability.trace`) provides
 structured-execution-trace evidence and never becomes a parallel
 reconstruction authority.  The phase recorder
 (:mod:`saberops.observability.phase_telemetry`) persists production phase
-telemetry (ROADMAP §11) and never becomes an authority for routing, effort,
+telemetry and never becomes an authority for routing, effort,
 scheduling, lifecycle, review, or validation.
 """
 

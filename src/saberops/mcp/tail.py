@@ -1,4 +1,4 @@
-"""Read-only incremental progress tail for one job (Phase 1 Wave 3 F3).
+"""Read-only incremental progress tail for one job.
 
 ``tail_job`` lets a planner in a second session read a running worker's
 progress without touching it.  Two durable records the engine already writes

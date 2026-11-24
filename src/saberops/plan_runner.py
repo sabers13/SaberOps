@@ -1,4 +1,4 @@
-"""Plan-lane submission and the scheduler reconciler (Phase 1 lane P2).
+"""Plan-lane submission and the scheduler reconciler.
 
 What this module is
 -------------------
@@ -18,29 +18,29 @@ ordinary jobs, one ``submit_job`` per lane, and nothing else.
 * The plan layer chooses *what may start*.  Routing, quota, the memory budget,
   worktrees, retries and acceptance stay exactly where they are: the scheduler
   and the owner.
-* P6 adds the deterministic landing queue (wave, then lane id), stale marking
-  for a candidate built on an old target and an owner-enabled refresh pass that
-  rebuilds at most one stale sibling per tick through E6.  It never accepts and
-  never pushes; a failed refresh is recorded on the lane, not retried forever.
+* The landing queue is deterministic (wave, then lane id).  A candidate built
+  on an old target is marked stale, and an owner-enabled refresh pass rebuilds
+  at most one stale sibling per tick.  It never accepts and never pushes; a
+  failed refresh is recorded on the lane, not retried forever.
 
-Two owner decisions shape this lane:
+Three rules shape the module:
 
 1. **Owner-held lanes are never dispatched.**  ``run: "owner"`` work is
    completed only by ``orch plan-file done``.
-2. **Closing the planning CLI pauses the work (F17).**  Every lane submission
-   goes through :func:`submit_lane_job`, which consults
-   :data:`LANE_SUBMIT_GATE` (the seam lane F17 can install) and, for the
-   scheduler reconciler, refuses to submit when no live planning session holds
-   the MCP planning lease.  The scheduler lease alone is not a planning
-   session.  When F17 lands it will extend that pause to every other kind of
-   work; this lane only guarantees plan lanes.
-3. **Auto-advance asks the typed owner decision (F1).**  The same
+2. **Closing the planning CLI pauses the work.**  Every lane submission goes
+   through :func:`submit_lane_job`, which consults
+   :data:`LANE_SUBMIT_GATE` and, for the scheduler reconciler, refuses to
+   submit when no live planning session holds the MCP planning lease.  The
+   scheduler lease alone is not a planning session.  The same pause covers
+   every other kind of work.
+3. **Auto-advance asks the typed owner decision.**  The same
    :func:`saberops.owner_mode.decide_owner_action` every other decision point
    calls answers whether a lane may start.  A mode can only narrow the
    authority preset; an unreadable mode or authority document refuses the
-   start.  This is a *start* capability only: acceptance stays owner-only
-   until F15, so an away plan parks at the first candidate with that reason
-   visible in ``STATE.md``.
+   start.  This is a *start* capability only: acceptance stays with the owner
+   unless an eligible candidate meets the auto-accept rules, so an away plan
+   parks the first candidate that does not, with that reason visible in
+   ``STATE.md``.
 
 No model, provider or network call is made here.  The only side effects are
 owner-database rows, the immutable plan revision, and ordinary jobs.
@@ -154,7 +154,7 @@ MAX_ACTIVE_PLANS_PER_TICK = 3
 #: instead of blocking the tick for a whole wave.
 MAX_REFRESHES_PER_TICK = 1
 
-#: F17 seam: a callable returning a pause reason, or ``None`` to allow work.
+#: Seam: a callable returning a pause reason, or ``None`` to allow work.
 #: It receives the owner database.  A raising gate fails closed.
 LANE_SUBMIT_GATE: Callable[[Any], str | None] | None = None
 
@@ -163,7 +163,7 @@ NO_PLANNING_SESSION = "no_planning_session"
 PLANNING_GATE_ERROR = "planning_gate_error"
 #: Reason recorded when the plan record itself disables automatic advance.
 AUTO_ADVANCE_OFF = "auto_advance_off"
-#: Prefix for a refusal from F1's effective-permission function.
+#: Prefix for a refusal from the effective-permission function.
 MODE_RESTRICTED = "mode_restricted"
 
 _PRIORITIES = {item.value for item in Priority}
@@ -286,7 +286,7 @@ def ensure_plan_tables(db: Any) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_plan_events_plan ON plan_events(plan_id, id)"
         )
-        # Older plan tables predate mid-run edits (P4).  Adding the columns in
+        # Older plan tables predate mid-run edits. Adding the columns in
         # place keeps an existing owner store readable without a second table.
         columns = {
             str(row["name"]) for row in conn.execute("PRAGMA table_info(plan_lanes)")
@@ -382,7 +382,7 @@ class _LaneRow:
 
 @dataclass(frozen=True)
 class LaneView:
-    """One lane's live, record-derived state (the basis of P3's ledger)."""
+    """One lane's live, record-derived state (the basis of the return-summary ledger)."""
 
     lane_id: str
     title: str
@@ -392,7 +392,7 @@ class LaneView:
     status: str
     reasons: tuple[str, ...] = ()
     job_id: str | None = None
-    #: The revision that superseded this lane's mapped attempt, if any (P4).
+    #: The revision that superseded this lane's mapped attempt, if any.
     superseded_by: str | None = None
 
     @property
@@ -503,16 +503,16 @@ class PlanRefreshResult:
 
 
 # ---------------------------------------------------------------------------
-# Planning-session gate (F17 seam)
+# Planning-session gate (seam)
 # ---------------------------------------------------------------------------
 
 
 def set_lane_submit_gate(gate: Callable[[Any], str | None] | None) -> None:
     """Install (or clear) the gate every lane submission passes through.
 
-    Lane F17 (closing the planning CLI pauses all work) will register its pause
-    check here.  The gate returns a short reason when work must not start; a
-    raising gate is treated as a pause, never as permission.
+    The planning-session pause check is registered here.  The gate returns a
+    short reason when work must not start; a raising gate is treated as a
+    pause, never as permission.
     """
     global LANE_SUBMIT_GATE
     LANE_SUBMIT_GATE = gate
@@ -521,7 +521,7 @@ def set_lane_submit_gate(gate: Callable[[Any], str | None] | None) -> None:
 def planning_session_active() -> bool:
     """True when a live planning session holds the MCP planning lease.
 
-    F17: liveness is the heartbeat, not only the pid.  A session whose CLI was
+    Liveness is the heartbeat, not only the pid.  A session whose CLI was
     killed leaves a dead pid; one whose connection broke or that crashed leaves
     a stale heartbeat.  Both are "no session", so plan lanes stop being
     submitted.  A missing, malformed or unreadable lease is not a session.
@@ -535,10 +535,10 @@ def planning_session_active() -> bool:
 
 
 def _dispatch_permission() -> str | None:
-    """Return a refusal reason when F1's effective permission forbids a start.
+    """Return a refusal reason when the effective permission forbids a start.
 
     Plan auto-advance is a start capability, so it asks the same typed owner
-    decision every other decision point asks (F1/ADR-0020).  `ask-me` leaves
+    decision every other decision point asks (ADR-0020). `ask-me` leaves
     the authority preset's ``auto_start`` intact: starting an already-activated
     lane is not an owner judgment, while acceptance stays owner-only.  A
     narrower authority preset (`ask_before_actions`) refuses it here, and a
@@ -667,7 +667,7 @@ def lane_digest(task: PlanTaskDef) -> str:
 def lane_spec_digest(task: PlanTaskDef) -> str:
     """Return the digest of a lane's brief, ignoring its dependency edges.
 
-    A mid-run edit (P4) treats a dependency-only change differently from a
+    A mid-run edit treats a dependency-only change differently from a
     changed brief: edges are never retroactive, while a changed brief supersedes
     a live attempt.  The edges are part of :func:`lane_digest` (the idempotency
     key), so the two cases need separate hashes.
@@ -860,7 +860,7 @@ def _lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
 
 
 def plan_lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
-    """Public read-only accessor for one plan's lane rows (P3 projection)."""
+    """Public read-only accessor for one plan's lane rows (projection)."""
     return _lane_rows(db, plan_id)
 
 
@@ -897,7 +897,8 @@ def lane_touches_for_run(db: Any, run_id: str) -> tuple[str, ...]:
 
 
 # ---------------------------------------------------------------------------
-# Landing order and the lane's live run (shared by the ledger and P6)
+# Landing order and the lane's live run (shared by the ledger and the
+# landing queue)
 # ---------------------------------------------------------------------------
 
 
@@ -959,7 +960,7 @@ def lane_run(db: Any, job: Job | None, *, accepted: bool) -> tuple[Run | None, A
 
     Returns the newest completed run (the accepted one when the lane is
     accepted), else the newest run of any status, together with the store that
-    holds it.  A refreshed run is appended to ``job.run_ids`` (P3), so a
+    holds it. A refreshed run is appended to ``job.run_ids``, so a
     projection and the refresh queue see the same candidate.
     """
     if job is None or not job.run_ids:
@@ -989,7 +990,7 @@ def _sync_lane_rows(
 
     An existing row keeps the digest of the spec its current attempt was
     submitted under; the reconciler compares that digest with the active
-    revision and applies the mid-run edit rules (P4).  Only a lane the plan has
+    revision and applies the mid-run edit rules. Only a lane the plan has
     never seen is inserted here.
     """
     stamp = _iso(now)
@@ -1083,7 +1084,7 @@ def _lane_status(
 ) -> tuple[str, Job | None]:
     """Map one lane's live records onto the frontier's status vocabulary.
 
-    A superseded lane (P4) keeps the status of its live attempt: an attempt
+    A superseded lane keeps the status of its live attempt: an attempt
     that is still running reserves its scopes and holds its dependants, and an
     accepted attempt is an owner decision that counts.  Only an attempt with no
     job is ``PENDING`` again, so the reconciler can submit the new spec.
@@ -1271,7 +1272,7 @@ def submit_plan_file(
     Activation is idempotent on semantic content.  It refuses a dirty checkout
     (acceptance needs a clean tree) and an unconfined path, then submits every
     currently eligible lane through :func:`submit_lane_job` -- the single
-    function the F17 pause gate wraps.
+    function the pause gate wraps.
     """
     root = canonical_repo_root(repo)
     if root is None:
@@ -1302,7 +1303,7 @@ def submit_plan_file(
             "complete or abandon it first"
         )
 
-    # P4: refuse a revision that rewrites accepted or owner-completed work
+    # Refuse a revision that rewrites accepted or owner-completed work
     # BEFORE anything is stored or cancelled.  The old revision stays active.
     if existing is not None and existing.active_version:
         try:
@@ -1351,7 +1352,7 @@ def submit_plan_file(
     )
     _notify_scheduler(db)
     results = reconcile_plan_lanes(db, now=now, owner_initiated=owner_initiated)
-    # P3: render immediately after activation; the tick re-renders only when
+    # Render immediately after activation; the tick re-renders only when
     # the projection digest changes.  A render failure never fails the submit.
     try:
         from saberops.plan_state import render_plan_state
@@ -1382,7 +1383,7 @@ def _notify_scheduler(db: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Lane submission (the one function F17 gates)
+# Lane submission (the one function gates)
 # ---------------------------------------------------------------------------
 
 
@@ -1407,17 +1408,17 @@ def _lane_goal(task: PlanTaskDef) -> str:
     return f"{title}\n\n{body}" if body else title
 
 
-#: Bound on each scout report carried into a dependant lane's goal (F19).
+#: Bound on each scout report carried into a dependant lane's goal.
 MAX_ATTACHED_SCOUT_REPORT_CHARS = 20_000
 
 
 def _scout_report_context(
     db: Any, plan: PlanRecord, task: PlanTaskDef, rows: dict[str, _LaneRow]
 ) -> tuple[str, tuple[dict[str, str], ...]]:
-    """Attach the reports of a lane's scout dependencies (F19).
+    """Attach the reports of a lane's scout dependencies.
 
     A scout lane has no candidate to accept, so its report *is* what a
-    dependant inherits.  The report is read from its durable E4 path and its
+    dependant inherits. The report is read from its durable path and its
     path and digest are recorded on the dependant's submission event.
     """
     if not task.start_dependencies:
@@ -1466,7 +1467,7 @@ def submit_lane_job(
 ) -> LaneSubmitResult:
     """Submit one eligible lane as an ordinary job, or refuse.
 
-    This is the only lane-submission path.  It consults the F17 gate and, when
+    This is the only lane-submission path. It consults the gate and, when
     the caller is the scheduler reconciler, requires a live planning session to
     hold the planning lease.  A lane already linked to a job is never
     resubmitted; a crash between submission and the mapping write recovers
@@ -1549,7 +1550,7 @@ def submit_lane_job(
 
 
 # ---------------------------------------------------------------------------
-# Mid-run plan edits (P4)
+# Mid-run plan edits
 # ---------------------------------------------------------------------------
 
 
@@ -1625,7 +1626,7 @@ def _supersede_event(
 def _backfill_lane_specs(
     db: Any, plan: PlanRecord, revision: PlanRevision, *, now: datetime | None = None
 ) -> None:
-    """Give rows written before P4 a brief digest from the previous revision.
+    """Give older rows a brief digest from the previous revision.
 
     Without this, the first edit after an upgrade cannot tell a dependency-only
     change from a changed brief on a lane whose live attempt predates the
@@ -1736,7 +1737,7 @@ def _apply_lane_edits(
         spec = lane_spec_digest(task)
         if row.lane_digest == digest:
             if row.lane_spec_digest != spec:
-                # A row written before P4 has no brief digest yet; the spec is
+                # An older row has no brief digest yet; the spec is
                 # unchanged, so this is a backfill, not an edit.
                 _update_lane_row(
                     db,
@@ -2245,7 +2246,7 @@ def _dependencies_satisfied(
 def _reconcile_one(
     db: Any, plan: PlanRecord, *, owner_initiated: bool, now: datetime | None
 ) -> PlanReconcileResult:
-    # P4: apply a mid-run edit before projecting.  The edit rules are
+    # Apply a mid-run edit before projecting.  The edit rules are
     # idempotent and keyed on the stored digests, so a crash between the
     # revision activation and this step is completed on the next tick.
     revision = plan.plan_store().get_revision(plan.project_id, plan.active_version)
@@ -2351,7 +2352,7 @@ def reconcile_plan_lanes(
 
 
 # ---------------------------------------------------------------------------
-# Landing queue and stale-sibling refresh (P6)
+# Landing queue and stale-sibling refresh
 # ---------------------------------------------------------------------------
 
 
@@ -2431,7 +2432,7 @@ def stale_candidate_lanes(db: Any, plan: PlanRecord) -> tuple[LaneRefresh, ...]:
         if row is None or not row.job_id:
             continue
         if row.superseded_by:
-            # P4: a changed lane's old candidate is an owner decision, never
+            # A changed lane's old candidate is an owner decision, never
             # something the refresh pass silently rebuilds.
             continue
         job = store.get_job(db, row.job_id)
@@ -2460,7 +2461,7 @@ def stale_candidate_lanes(db: Any, plan: PlanRecord) -> tuple[LaneRefresh, ...]:
 def _refresh_lane(
     db: Any, plan: PlanRecord, lane: LaneRefresh, *, target_head: str, now: datetime | None
 ) -> RefreshOutcome:
-    """Refresh one stale candidate through E6 and record the outcome."""
+    """Refresh one stale candidate through the refresh pass and record the outcome."""
     try:
         from saberops.refresh import refresh_candidate
         from saberops.service import OrchestratorService
@@ -2573,7 +2574,7 @@ def _refresh_plan(
 def refresh_stale_plan_candidates(
     db: Any, *, now: datetime | None = None
 ) -> tuple[PlanRefreshResult, ...]:
-    """Refresh stale candidate-ready siblings in landing order (P6).
+    """Refresh stale candidate-ready siblings in landing order.
 
     Runs only for plans whose owner turned ``auto_refresh`` on, only while work
     is not paused (the same gate and planning-session check lane submission

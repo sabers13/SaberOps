@@ -1,6 +1,6 @@
 """Deterministic write-scope, test-retirement and gate-protection checks.
 
-Three pre-G1 checks the engine raises itself, all pure and fail-closed:
+Three checks the engine raises itself, all pure and fail-closed:
 
 * **Write scope** -- every changed path must be inside the lane's ``Touches``
   and outside every ``must-not-touch`` path.  A violation is a review finding
@@ -308,7 +308,7 @@ def git_changed_files(repo_path: str, base: str, head: str = "HEAD") -> tuple[st
 #: Stable reason code for a candidate that mutated a protected gate definition.
 GATE_PROTECTED_PATH_MUTATED: Final[str] = "GATE_PROTECTED_PATH_MUTATED"
 
-#: The gate definitions the roadmap names explicitly (GT-1).  Matching is done
+#: The gate definitions the engine trusts explicitly.  Matching is done
 #: by :data:`PROTECTED_GATE_DIRECTORIES`, which contains this whole directory;
 #: the tuple is kept as the named policy list so the intent stays readable.
 PROTECTED_GATE_SCRIPT_PATHS: Final[tuple[str, ...]] = (

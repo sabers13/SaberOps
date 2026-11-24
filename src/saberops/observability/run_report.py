@@ -1164,8 +1164,7 @@ def _evidence_section(
 ) -> dict[str, Any]:
     """Project the durable evidence behind the report's derived facts.
 
-    Moved here from the retired ``observability._core`` snapshot reader so
-    one projection answers every evidence question: the frozen contracts,
+    One projection answers every evidence question: the frozen contracts,
     dispatch and usage rows, findings, project scope, continuation rows,
     quota observations, phase telemetry and reconstruction completeness.
     """
@@ -1640,9 +1639,8 @@ def render_monitor_frame(report: dict[str, Any], *, now_iso: str | None = None) 
 def run_explanation(report: dict[str, Any]) -> str:
     """One-paragraph human-readable summary of a canonical run report.
 
-    Moved from saberops.chat (L-A step 5): the console cut removed the chat
-    frontend, but the run-detail status page still renders this summary.
-    Pure report projection; never dispatches work.
+    The run-detail status page renders this summary.  Pure report
+    projection; never dispatches work.
     """
     termination = report["termination"]
     execution = report["execution"]

@@ -494,10 +494,9 @@ def build_retry_projection(
         )
         stderr = getattr(prior_check, "stderr", None) or ""
         stdout = getattr(prior_check, "stdout", None) or ""
-        # Both streams are projected.  A single warning on stderr used to hide
-        # the test summary on stdout from the next attempt, so the worker saw
-        # the warning and never the failing test.  The present streams share
-        # the one evidence block: two streams get half each, so the evidence
+        # Both streams are projected: a warning on stderr no longer hides the
+        # test summary on stdout from the next attempt.  The streams share the
+        # one evidence block: two streams get half each, so the evidence
         # keeps its size while a lone stream keeps the whole block as before.
         streams = [
             (label, stream.strip())

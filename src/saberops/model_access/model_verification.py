@@ -92,7 +92,7 @@ def verify_native_model(
             # with ancestor discovery disabled by the owned isolation root; the
             # inline config below additionally denies plugins/MCP/skills.
             # The installed opencode v2.0.29 ``run --help`` documents no
-            # ``--dir`` or ``--pure`` flag (HV-1 F1, fixed in Step 024/HV-2),
+            # ``--dir`` or ``--pure`` flag,
             # so the directory is the child ``cwd``.
             access_config: dict[str, Any] = {
                 "permission": "deny", "share": "disabled",

@@ -1,12 +1,12 @@
-"""A guided first-run walkthrough in plain words (F25).
+"""A guided first-run walkthrough in plain words.
 
-The owner asked for a starting message that introduces SaberOps to someone
-non-technical, then sets the store up conversationally, one step at a time.
+A starting message introduces SaberOps to someone non-technical, then sets
+the store up conversationally, one step at a time.
 This module is the single source for that text: the MCP guide, the MCP
 ``start_walkthrough`` tool, the ``saberops_on`` reply and ``orch welcome`` all
 render it, so they cannot drift apart.
 
-Nothing here grants authority. The walkthrough only *describes* the C6
+Nothing here grants authority. The walkthrough only *describes* the
 preflight: each missing item becomes one step with a plain explanation, the
 exact command that fixes it, and a kind that tells the agent what it may do.
 

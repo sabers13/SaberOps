@@ -256,7 +256,7 @@ def _validate_auth_header_name(name: str, *, credential_ref: str) -> str:
     """Validate a credential-bearing header *name* (never a value).
 
     Persists only which header the referenced credential binds to at
-    the future execution boundary (e.g. ``X-API-Key`` + ``env:KEY``).
+    the execution boundary (e.g. ``X-API-Key`` + ``env:KEY``).
     A declared name requires a ``credential_ref`` handle; the value
     itself never exists in this subsystem.
     """

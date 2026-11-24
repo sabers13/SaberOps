@@ -14,7 +14,7 @@ building.  This module is the engine side of that workflow:
 * its advice is returned to the caller and recorded on the run, so it reaches
   a worker at the moment it is needed rather than at the next attempt boundary;
 * calls are bounded by the per-job budget, counted in per-job usage, refused
-  while the work gate is closed (F17), and refused with a visible reason when
+  while the work gate is closed, and refused with a visible reason when
   the route is unavailable;
 * the advisor is not the independent reviewer and never produces a candidate
   or a commit.

@@ -68,7 +68,7 @@ DIFFICULTIES = frozenset({"routine", "hard"})
 EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 PRIORITIES = frozenset({"URGENT", "NORMAL", "BACKGROUND"})
 RUN_KINDS = frozenset({"job", "owner"})
-#: F19 job kind a dispatched lane delivers; roles stay PLAN / BUILD / CHECK.
+#: Job kind a dispatched lane delivers; roles stay PLAN / BUILD / CHECK.
 LANE_KINDS = frozenset({"job", "scout"})
 
 _HEADER_KEYS = frozenset({"format", "plan_id", "base", "title"})
@@ -126,19 +126,19 @@ class PlanLane:
     depends_on: tuple[str, ...] = ()
     owns: tuple[str, ...] = ()
     size: str = ""
-    #: Planner-recorded judgement (H1): ``routine`` (default) or ``hard``.
+    #: Planner-recorded judgement: ``routine`` (default) or ``hard``.
     difficulty: str = ""
     effort: str = ""
     model_family_include: tuple[str, ...] = ()
     model_family_exclude: tuple[str, ...] = ()
     priority: str = ""
     run: str = "job"
-    #: ``job`` (default) or ``scout`` (F19): a scout lane's report becomes the
+    #: ``job`` (default) or ``scout``: a scout lane's report becomes the
     #: starting context of the lanes that depend on it.
     kind: str = "job"
     #: Optional focus for the independent reviewer; adds attention only.
     review_focus: str = ""
-    #: Planner-recorded H20 judgement: the lane's candidate is consequential,
+    #: Planner-recorded judgement: the lane's candidate is consequential,
     #: so away and critical-only park it for the owner.  The engine's own
     #: fixed floor applies either way.
     consequential: bool = False

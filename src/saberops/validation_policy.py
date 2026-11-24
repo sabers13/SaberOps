@@ -23,9 +23,8 @@ Ownership invariant (UNAMBIGUOUS — one meaning only):
                   without dispatching another model.
 
 The compact policy appended to every worker contract makes that ownership
-boundary explicit so prompt builders never drift back to the historical
-B1-failure pattern of a worker running a full gate and an Orchestrator
-re-running it.
+boundary explicit so prompt builders never drift back to a worker running
+a full gate and the Orchestrator re-running it.
 """
 
 from __future__ import annotations
@@ -33,12 +32,12 @@ from __future__ import annotations
 VALIDATION_POLICY_MARKER = "VALIDATION POLICY:"
 
 #: Engine-generated worker instructions appended to every build-role attempt
-#: (H12, ADR-0089).  Build role only: a scout keeps its own section and a
-#: reviewer or advisor keeps its fixed instructions.
+#: Build role only: a scout keeps its own section and a reviewer or advisor
+#: keeps its fixed instructions (ADR-0089).
 WORKER_INSTRUCTIONS_MARKER = "[HOW TO WORK]"
 
 #: The main skill and this section are the only guidance the planner governs;
-#: both are bounded by tests (H12).
+#: both are bounded by tests.
 MAX_WORKER_INSTRUCTION_LINES = 16
 
 WORKER_INSTRUCTIONS = (

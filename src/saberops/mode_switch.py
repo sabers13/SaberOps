@@ -127,7 +127,7 @@ class HookSupport:
 
 #: The four planner CLIs.  Only Claude Code documents a hook on the owner's
 #: typed message that this repository can rely on; the entry is unverified on a
-#: live CLI here (H37 does the real-session check, owner present).  Codex is
+#: live CLI here (does the real-session check, owner present). Codex is
 #: explicitly unsupported because SaberOps itself launches it with
 #: ``-c features.hooks=false`` (ADR-0019), so an installed hook would never run.
 HOOK_SUPPORT: Final[tuple[HookSupport, ...]] = (

@@ -56,9 +56,9 @@ from saberops.models import ReasoningEffort
 #: capability source proves otherwise.
 EFFORT_DISCOVERY_UNKNOWN = "EFFORT_DISCOVERY_UNKNOWN"
 
-#: Phase 1.1 (ADR-0064) removed the in-engine Orchestrator model.  A store
-#: written before that release still carries ``orch_binding_policy``; the
-#: engine ignores it and tells the owner once per process.
+#: A store written before the planner owned selection still carries
+#: ``orch_binding_policy`` (ADR-0064); the engine ignores it and tells the
+#: owner once per process.
 RETIRED_SELECTION_NOTICE = (
     "SaberOps: the saved orchestrator model binding is no longer used and was "
     "ignored (ADR-0064). The agent you plan from is the planner; the next "

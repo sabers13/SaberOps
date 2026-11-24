@@ -921,7 +921,7 @@ class AcceptEngine:
             )
         )
 
-        # H6 (ADR-0016): a steering note that never reached a worker is a
+        # A steering note that never reached a worker is a
         # correction the engine still owes the worker.  Accepting past it would
         # publish work the owner already asked to change, so the candidate is
         # ineligible until the note is delivered by a redirect or the owner
@@ -1252,7 +1252,7 @@ class AcceptEngine:
 
         Returns ``(bound_review, historical_review)`` with the same matching
         rules acceptance enforces, so a caller that needs stricter evidence
-        (for example F15 auto-accept, which always requires a review) never
+        (for example auto-accept, which always requires a review) never
         re-implements the dispatch association.
         """
         return self._resolve_candidate_review(run_id, candidate_sha)
@@ -1270,7 +1270,7 @@ class AcceptEngine:
         "accepted only once" engine precondition here.  Candidate
         lifecycle / accepted-state policy belongs to the candidate lifecycle.
 
-        ``automatic`` (F15) is the deterministic auto-accept audit record.  When
+        ``automatic`` is the deterministic auto-accept audit record. When
         present it is embedded in the durable ``run_accepted`` payload, so the
         acceptance and its reason are written atomically and an interrupted
         process cannot leave an unmarked acceptance behind.  It changes no
@@ -1366,7 +1366,7 @@ class AcceptEngine:
                 gate_passed=self._validation_policy(run_id)[0],
             )
 
-        # H6 (ADR-0016): acceptance never publishes past a steering note that
+        # Acceptance never publishes past a steering note that
         # did not reach a worker.  Same predicate as the read-only checklist, so
         # the projected eligibility and the enforced precondition cannot drift.
         # This runs after the idempotent "already integrated" return: a repeat

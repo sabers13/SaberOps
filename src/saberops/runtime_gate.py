@@ -21,7 +21,7 @@ it sees what was paused and the owner (or that session) clears the pause with on
 command or tool call.  That is why the gate is a small durable document rather
 than a pure function of liveness.
 
-Presence is required from the start for **every** store (F24): a fresh store
+Presence is required from the start for **every** store: a fresh store
 with no planning session never starts work, whether or not a session was ever
 seen.  Presence comes from either of two live sources:
 
@@ -32,7 +32,7 @@ seen.  Presence comes from either of two live sources:
 A store that has never had either source is closed but **not** sticky: work
 queued by a direct ``orch`` command starts as soon as an attended session
 opens, because nothing was interrupted.  Once presence has been seen, losing it
-is the F17 pause: a sticky record, one notice, running workers parked at a safe
+is the pause: a sticky record, one notice, running workers parked at a safe
 point, and an explicit confirmation to resume.
 """
 
@@ -216,11 +216,11 @@ class GateDocument:
     """The durable gate document (``<state>/runtime-gate.json``).
 
     ``presence_known`` is kept as the on-disk arming flag for compatibility
-    with F17 documents, but every store is armed from the start (F24).  A
+    with older documents, but every store is armed from the start. A
     legacy document that says ``presence_known: false`` is migrated when the
     engine next evaluates the gate.  ``presence_seen_at`` records the first
     time a session was actually live, so a never-attended store closes without
-    a sticky pause while a store that lost its session keeps F17's pause.
+    a sticky pause while a store that lost its session keeps its pause.
     """
 
     presence_known: bool = True
@@ -232,7 +232,7 @@ class GateDocument:
     presence_seen_at: str | None = None
     schema_version: int = SCHEMA_VERSION
     extra: dict[str, Any] = field(default_factory=dict)
-    #: True only on an in-memory document read from an F17 unarmed file.
+    #: True only on an in-memory document read from an unarmed file.
     legacy_unarmed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
@@ -289,7 +289,7 @@ class GateState:
     presence_seen: bool = False
     #: Closed only because a never-attended store has no session: not sticky.
     transient: bool = False
-    #: An F17 ``presence_known: false`` document still needs its one migration.
+    #: An ``presence_known: false`` document still needs its one migration.
     migration_pending: bool = False
 
     @property
@@ -315,7 +315,7 @@ class GateState:
             "paused_jobs": list(self.paused_jobs),
             "resume_requires": self.resume_requires,
             "resume_command": "orch resume",
-            # D16: resuming is owner-only.  No MCP tool clears a pause, so the
+            # Resuming is owner-only.  No MCP tool clears a pause, so the
             # projection names the owner's command and no tool.
             "resume_tool": None,
         }
@@ -373,7 +373,7 @@ def read_gate(path: Path | None = None) -> GateDocument:
     """Read the gate document; a missing file is a fresh, armed gate.
 
     A file that exists but cannot be parsed raises: an unreadable gate must
-    never be read as "open".  An F17 document written with
+    never be read as "open". A document written with
     ``presence_known: false`` reads as armed and is marked ``legacy_unarmed``
     so :func:`refresh_gate` can persist the migration and send one notice.
     """
@@ -464,7 +464,7 @@ def write_gate(document: GateDocument, path: Path | None = None) -> Path:
 
 
 def _lease_presence(moment: datetime) -> Presence:
-    """The planning-lease half of presence (F17)."""
+    """The planning-lease half of presence."""
     from saberops.mcp.lease import OrchestratorLease, pid_is_alive
 
     try:
@@ -533,7 +533,7 @@ def _lease_presence(moment: datetime) -> Presence:
 
 
 def _terminal_presence(moment: datetime) -> Presence | None:
-    """The attended-terminal half of presence (F24); ``None`` when absent."""
+    """The attended-terminal half of presence; ``None`` when absent."""
     from saberops.attendance import live_attendance
 
     record = live_attendance(now=moment)
@@ -867,7 +867,7 @@ def evaluate_gate(
         # The away grant is over.  Its own pause record can no longer govern
         # work: an ended away session is the ``ask-me`` mode, not a permanent
         # pause.  Presence still applies below, so a closed planning session
-        # keeps its ordinary F17 pause.
+        # keeps its ordinary pause.
         document = replace(document, pause=None)
     current = presence(now=moment)
     started = jobs_started
@@ -938,8 +938,8 @@ def refresh_gate(
     A never-attended store (no live session was ever seen) closes *without* a
     sticky pause: it has no interrupted work and work queued by a direct
     ``orch`` command should start as soon as an attended session opens.  The
-    first live session is recorded here; every later loss is F17's sticky
-    pause.  An F17 document written unarmed is migrated here with one notice.
+    first live session is recorded here; every later loss is a sticky
+    pause. A document written unarmed is migrated here with one notice.
     """
     moment = now or _now()
     state = evaluate_gate(db=db, now=moment, path=path)
@@ -980,7 +980,7 @@ def _persist_presence_bookkeeping(
 def _migrate_legacy_gate(
     db: Any | None, state: GateState, moment: datetime, *, path: Path | None
 ) -> None:
-    """Arm an F17-unarmed document once, with one notice and one ledger event."""
+    """Arm an unarmed document once, with one notice and one ledger event."""
     if not state.migration_pending:
         return
     try:
@@ -1178,7 +1178,7 @@ def _running_usage_rows(db: Any) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
-# Plan-lane seam (F17 + P2)
+# Plan-lane seam
 # --------------------------------------------------------------------------- #
 
 

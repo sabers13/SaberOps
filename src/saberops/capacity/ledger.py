@@ -1,8 +1,8 @@
-"""Capacity ledger (M2-4a C): owner observations, reservations, estimates.
+"""Capacity ledger: owner observations, reservations, estimates.
 
 Storage lives in the owner DB (see :mod:`saberops.capacity.store`); every
 writer here creates its tables idempotently first. The job queue package
-is never imported (cross-lane contract C2): ``job_id`` is opaque.
+is never imported: ``job_id`` is opaque.
 
 Ledger keys are ``(pool_id, window_id)`` pairs derived with
 :func:`saberops.capacity.snapshot._legacy_pool_and_window`, so the ledger
@@ -10,7 +10,7 @@ and the routing seam can never disagree on keys.
 
 Known limitation: the probe red-line path records a **per-pool** minimum,
 so its ledger key is ``(pool_id, "ALL")``; per-window probe evidence in
-the ledger comes with M2-4b's evidence-driven probing.
+the ledger comes with evidence-driven probing.
 """
 
 from __future__ import annotations
@@ -570,7 +570,7 @@ class ReservedDebt:
 
     ``job_id`` is the opaque owning job recorded at dispatch, or ``None`` for
     a legacy row.  This is a *read model* only: the ledger never interprets
-    job state (cross-lane contract C2).
+    job state.
     """
 
     run_id: str
@@ -628,7 +628,7 @@ def release_terminal_debt(
 ) -> int:
     """Release one conclusively terminal run's RESERVED rows (idempotent).
 
-    This is the owner-authorised settlement write for old-run D8 debt.  It is
+    This is the owner-authorised settlement write for old-run debt. It is
     deliberately narrower than :func:`release`:
 
     * a ``job_id`` guard (when given) keeps an unrelated job's rows with the

@@ -1,4 +1,4 @@
-"""Learned per-job cost model (M2-4a B).
+"""Learned per-job cost model.
 
 Pure, no I/O. One cost state per ``(route, pool_id, window_id, bucket)``
 key, where ``route`` is the routing-chain candidate id ``provider/model``.
@@ -25,7 +25,8 @@ class SizeBucket(StrEnum):
 
 
 # Packaged placeholder priors: percent of the window per job, keyed by
-# (window_id.lower(), bucket). Owner-configured priors arrive with M2-4b.
+# (window_id.lower, bucket). Owner-configured priors override these entries
+# when present.
 _PRIORS: dict[tuple[str, str], float] = {
     ("5h", "S"): 3.0,
     ("5h", "M"): 8.0,

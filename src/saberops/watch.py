@@ -1,11 +1,11 @@
-"""Read-only tmux watch view: one window per running job (Phase 1 Wave 3 F23).
+"""Read-only tmux watch view: one window per running job.
 
 ``orch watch`` gives the owner the tmux habit back without reopening the
 tmux handoff ADR-0001 cut.  Workers stay headless (``claude -p``,
 ``codex exec``, ``opencode run``); there is no worker pane to attach to.
 The view only *observes* durable records:
 
-* one window per RUNNING job, running the same read-only tail F3 exposes
+* one window per RUNNING job, running the same read-only tail the ``tail_job`` tool exposes
   (``saberops.mcp.tail.tail_run`` over the run's event log and terminal
   transcript), plus a status line with route, subscription, attempt and
   elapsed time;
@@ -14,7 +14,7 @@ The view only *observes* durable records:
 Nothing here writes to the engine or talks to a worker.  No keystroke in a
 watch window can reach a worker because no window has a worker input path:
 each window runs ``orch watch --follow``, which opens the store read-only.
-Steering stays in the F13 note channel (``orch job note``).
+Steering stays in the note channel (``orch job note``).
 
 Lifecycle rules
 ---------------
@@ -261,7 +261,7 @@ class Tmux:
     def has_client(self, session: str) -> bool:
         """Whether a terminal is currently attached to ``session``.
 
-        F24: an attended terminal is presence only while a client is attached.
+        An attended terminal is presence only while a client is attached.
         A tmux session that outlives its terminal is not attended.
         """
         if self._path is None:
@@ -451,9 +451,8 @@ def next_owner_action(db: Any, job: Job) -> str:
 def pause_state(db: Any) -> str:
     """Owner pause state, read from a durable pause record when one exists.
 
-    F17 (closing the planning CLI pauses all work) has not landed yet; this
-    reads its record through an optional store accessor and otherwise says so
-    plainly instead of guessing from transient state.
+    This reads the pause record through an optional store accessor and
+    otherwise says so plainly instead of guessing from transient state.
     """
     getter = getattr(db, "get_owner_pause", None)
     if callable(getter):
@@ -718,7 +717,7 @@ def _refresh_watch_attendance(
 ) -> Any | None:
     """Hold presence only while a terminal is attached to our watch session.
 
-    F24: the summary window is the keeper of ``orch watch`` presence.  It runs
+    The summary window is the keeper of ``orch watch`` presence.  It runs
     inside the tmux session, so it can tell an attached terminal from a session
     left behind after the terminal closed.  A detached session stops
     heartbeating and presence expires within the bounded timeout.
@@ -1004,7 +1003,7 @@ def handle_watch(args: Any) -> int:
             "watch: tmux is not installed; falling back to `orch report --follow`.",
             file=sys.stderr,
         )
-        # F24: the fallback is still an attended terminal view; hold presence
+        # The fallback is still an attended terminal view; hold presence
         # for as long as this command runs.
         from saberops.attendance import attend
 
@@ -1062,7 +1061,7 @@ def handle_watch(args: Any) -> int:
         "worker).",
         file=sys.stderr,
     )
-    # F24: the attaching command is itself an attended terminal session.  Its
+    # The attaching command is itself an attended terminal session.  Its
     # heartbeat ends when the terminal closes or the owner detaches.
     from saberops.attendance import start_attendance
 

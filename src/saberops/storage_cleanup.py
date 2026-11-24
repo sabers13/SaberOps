@@ -1,7 +1,7 @@
 """Owner-aware storage inventory, guarded cleanup and bounded maintenance.
 
-This module is the single inventory/cleanup implementation for the GS-1
-storage lifecycle (Step 008): it answers *what does SaberOps own on this host,
+This module is the single inventory/cleanup implementation for the
+storage lifecycle: it answers *what does SaberOps own on this host,
 what may a validated standing owner policy retire, and how is the scheduled
 maintenance pass bounded?*  The adaptive reservation ledger stays separate in
 :mod:`saberops.storage_budget`; nothing here activates it.
@@ -123,7 +123,7 @@ _ORCH_BRANCH_PREFIX: Final[str] = "orch/"
 
 
 class ArtifactClass(StrEnum):
-    """D6 artifact classes plus the Git lifecycle objects Amendment 1 adds."""
+    """The artifact classes the engine owns plus the Git lifecycle objects it adds."""
 
     ATTEMPT_WORKTREE = "attempt-worktree"
     LOCAL_BRANCH = "local-branch"
@@ -218,7 +218,7 @@ def measure_path_bytes(
     ``None`` (unknown), never zero.
 
     Covers: reclaimable-byte estimates account for
-    hard-linked package caches), D6 (unknown size fails closed).
+    hard-linked package caches), and an unknown size fails closed.
     """
     target = Path(path)
     try:
@@ -1346,7 +1346,7 @@ def _check_ref(ref: str, job_id: str | None) -> str | None:
     return None
 GC_POLICY_FILENAME: Final[str] = "storage_gc.json"
 
-#: A2's retention bound for worktrees this opt-in step must keep.
+#: The retention bound for worktrees this opt-in step must keep.
 LANDED_CLEANUP_RETENTION_DAYS: Final[int] = 14
 
 #: Non-`orch/` ignored entries inside a worktree that are proven disposable.

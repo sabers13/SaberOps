@@ -1,6 +1,6 @@
-"""Shared bounded SQLite connection/transaction policy (GS-1).
+"""Shared bounded SQLite connection/transaction policy.
 
-D7 requires the engine's SQLite writes to be robust to contention:
+The policy requires the engine's SQLite writes to be robust to contention:
 
 * WAL journaling;
 * ``busy_timeout`` of 30 s;
@@ -98,7 +98,7 @@ class SqliteBusyError(StorageInfraError, sqlite3.OperationalError):
     """``SQLITE_BUSY``/``database is locked`` persisted past the bounded budget.
 
     Deliberately *also* a :class:`sqlite3.OperationalError`: it is a typed INFRA
-    park for new D7 callers, while existing handlers that already catch
+    park for new callers, while existing handlers that already catch
     ``OperationalError`` (and fail closed) keep working unchanged.
     """
 
@@ -120,7 +120,7 @@ def is_busy_error(exc: BaseException) -> bool:
 
 
 def apply_write_pragmas(conn: sqlite3.Connection) -> None:
-    """Apply the D7 write-side pragmas to an already-open connection."""
+    """Apply the write-side pragmas to an already-open connection."""
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};")
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -270,7 +270,7 @@ def bounded_write(
     """Open a bounded ``BEGIN IMMEDIATE`` write transaction in one call.
 
     Combines :func:`write_connection` and :func:`immediate_transaction` so an
-    existing mutator can adopt the full D7 write policy with a single ``with``:
+    existing mutator can adopt the full write policy with a single ``with``:
     WAL, a 30 s busy timeout narrowed to the remaining shared deadline, one
     ``BEGIN IMMEDIATE`` with bounded backoff, commit on success and rollback on
     any exception.  Lock exhaustion raises :class:`SqliteBusyError`.

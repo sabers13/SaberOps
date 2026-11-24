@@ -47,7 +47,7 @@ SKIP_PROMPT_TOO_LARGE = "prompt_exceeds_transport_capability"
 
 #: Typed admission reasons that mean the pool crossed its red line.  A red-line
 #: refusal is re-evaluated against a fresh safe probe when one is available
-#: (N7); these are the only reasons where synthetic post-observation charges
+#: These are the only reasons where synthetic post-observation charges
 #: can be the sole tipping term.
 RED_LINE_REASONS: frozenset[str] = frozenset(
     {
@@ -67,7 +67,7 @@ def is_red_line_reason(reason: str | None) -> bool:
 
 
 def _capacity_terms(admission: Any) -> dict[str, object] | None:
-    """Expose the charge-ledger terms behind an admission decision (N7)."""
+    """Expose the charge-ledger terms behind an admission decision."""
     pool_id = getattr(admission, "pool_id", None)
     if pool_id is None and getattr(admission, "remaining_pct", None) is None:
         return None
@@ -97,7 +97,7 @@ def refresh_quota_evidence(
     policy: ControlPlanePolicy | None = None,
     now: datetime | None = None,
 ) -> str:
-    """Run the safe zero-inference probe seam for ``provider`` (N7/D14).
+    """Run the safe zero-inference probe seam for ``provider``.
 
     Returns the probe outcome (``ran`` when fresh evidence was recorded).  The
     caller re-reads quota states and re-decides; a probe that cannot run leaves
@@ -231,7 +231,7 @@ def capacity_probe_event_payload(
     The post-probe decision alone cannot answer "which term tipped it?" because
     the successful probe resets ``prior_charges_pct`` to zero.  This payload
     keeps the pre-probe reason, the full capacity block, and the probe outcome
-    together (N7-observability), and also names a stale-evidence exclusion.
+    together, and also names a stale-evidence exclusion.
     """
     payload = dict(decision.as_payload())
     payload["probe_outcome"] = probe_outcome
@@ -252,7 +252,7 @@ def format_mixed_exhaustion_summary(
 
     The launched attempts failed the gate; the skipped candidates are a
     secondary fact.  Reusing the zero-launch ``No eligible candidate`` wording
-    here made a two-gate-failure run read as ``provider_unavailable`` (N16).
+    here made a two-gate-failure run read as ``provider_unavailable``.
     """
     summary = (
         f"All {attempt_count} attempt(s) failed to pass gate '{gate_command}'."

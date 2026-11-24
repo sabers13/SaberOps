@@ -61,8 +61,8 @@ class DispatchDecision:
     multiplier: float = 1.0
     drawn_pools: tuple[str, ...] = ()
     draws: tuple[PoolDraw, ...] = ()
-    # Probeable stale-quota exclusions evaluated before this dispatch (N13 /
-    # item 5).  Persisted as a job event so an owner can see that a candidate
+    # Probeable stale-quota exclusions evaluated before this dispatch.
+    # Persisted as a job event so an owner can see that a candidate
     # was skipped for expired evidence even when another route dispatched.
     skipped_candidates: tuple[dict[str, Any], ...] = ()
 
@@ -137,8 +137,8 @@ def schedule(
 ) -> list[SchedulerDecision]:
     """Pure deterministic pacing scheduler.
 
-    Evaluates queued jobs in strict D7 order:
-    - Dependency-blocked jobs wait with their recorded reason (F8) before any
+    Evaluates queued jobs in strict order:
+    - Dependency-blocked jobs wait with their recorded reason before any
       routing, capacity or pacing evaluation.
     - URGENT > NORMAL > BACKGROUND
     - Within class: earliest deadline first, then FIFO by created_at
@@ -146,13 +146,13 @@ def schedule(
       with admitted candidates.
     - BACKGROUND jobs require binding pace >= background_min_pace.
     - Honors prefer_wait_minutes on fallback groups when exact/parsed ETA matches.
-    - A scout job (F19) prefers the cheapest plan model of each subscription
-      present on the build route (F27), keeping every candidate as a fallback;
+    - A scout job prefers the cheapest plan model of each subscription
+      present on the build route, keeping every candidate as a fallback;
       ``scout_routes[job_id]`` carries its project override.
     - A global aggregate ceiling (``global_slot_limit``) blocks dispatch once
       the number of top-level RUNNING jobs plus same-tick simulated starts
       reaches the ceiling, independent of pool mapping.
-    - ``blocked_providers`` (F18) is a provider -> reason map for vendor CLIs
+    - ``blocked_providers`` is a provider -> reason map for vendor CLIs
       whose version change is unverified or whose repair is outstanding.  A
       blocked candidate is never admitted; the job falls through to the next
       candidate or waits, and the reason is reported on the wait decision.
@@ -161,18 +161,18 @@ def schedule(
     decisions: list[SchedulerDecision] = []
     probes_needed: dict[str, ProbeDecision] = {}
 
-    # Track simulated concurrency and reservations across the scheduling batch (F2 & F3)
+    # Track simulated concurrency and reservations across the scheduling batch
     simulated_running: dict[str, int] = dict(running_counts or {})
     simulated_reservations: dict[tuple[str, str], float] = dict(reservations or {})
     # Counts every top-level RUNNING job supplied by the caller, including
-    # jobs with no capacity_reservations row or unknown pool mapping (F3).
+    # jobs with no capacity_reservations row or unknown pool mapping.
     global_running = len(running)
 
-    # Sort queued jobs according to D7 deterministic priority order
+    # Sort queued jobs according to deterministic priority order
     sorted_jobs = sorted(queued, key=_job_sort_key)
 
     for job in sorted_jobs:
-        # F8: a job whose dependencies are not all accepted never reaches
+        # A job whose dependencies are not all accepted never reaches
         # routing.  The reason is decided by the caller (DEPENDENCY, or
         # DEPENDENCY_FAILED when a dependency can never be accepted).
         blocker = (dependency_blockers or {}).get(job.job_id)
@@ -207,7 +207,7 @@ def schedule(
                 )
                 continue
 
-        # Global aggregate ceiling (D7/F3). Enforced here rather than only
+        # Global aggregate ceiling. Enforced here rather than only
         # through admit() so a full ceiling blocks dispatch even when the
         # capacity subsystem is unconfigured and admit() would otherwise
         # short-circuit to "unconfigured". Two jobs from distinct pools count
@@ -239,7 +239,7 @@ def schedule(
             continue
 
         try:
-            # H1: the planner's recorded difficulty selects the route, not a
+            # The planner's recorded difficulty selects the route, not a
             # keyword score.  ``hard`` asks for the build route's
             # ``strong_start`` chain; ``routine`` or a missing value stays on
             # the ordinary build chain.  An empty strong-start setting falls
@@ -274,7 +274,7 @@ def schedule(
             role, strong_start=strong_start
         )
         cheap_preferred: frozenset[tuple[str, str]] | None = None
-        # H8: ``effort: low`` prefers the cheapest plan model of each
+        # ``effort: low`` prefers the cheapest plan model of each
         # subscription on any job.  A scout is normalised to ``low`` when it is
         # created, so this one rule is also the scout default; the scout route
         # setting still narrows or disables it for scouts only.
@@ -408,13 +408,13 @@ def schedule(
                     ),
                 )
 
-                # Increment simulated running count for ALL drawn pools (F3)
+                # Increment simulated running count for ALL drawn pools
                 all_drawn = best.drawn_pools or ((best.pool_id,) if best.pool_id else ())
                 for pid in all_drawn:
                     simulated_running[pid] = simulated_running.get(pid, 0) + 1
                 global_running += 1
 
-                # Decrement budget across ALL drawn pools and windows (F2)
+                # Decrement budget across ALL drawn pools and windows
                 for draw in best.draws:
                     cost = _get_cost_estimate(
                         best.candidate, draw.pool_id, draw.window_id, size_bucket, cost_states
@@ -477,7 +477,7 @@ def schedule(
             # Check for needed probes across denied candidates.  A harness the
             # probe subsystem never runs automatically (Claude's interactive
             # usage reader) must not be promised as a probe: that parked the
-            # job in PROBE_PENDING forever with no remedy (D9).  Collect those
+            # job in PROBE_PENDING forever with no remedy. Collect those
             # denials as an owner-only quota-evidence refusal instead.
             from saberops.capacity.probes import AUTO_SAFE_HARNESSES
 
@@ -508,7 +508,7 @@ def schedule(
                     elif d.reason in red_line_reasons:
                         # A red line tipped by synthetic post-observation
                         # charges is re-checked with a fresh safe probe before
-                        # it refuses (N7).  A genuinely low pool reads low and
+                        # it refuses. A genuinely low pool reads low and
                         # keeps the refusal on the next tick; an unsafe harness
                         # (Claude's interactive reader) keeps today's
                         # conservative wait with no probe demand.

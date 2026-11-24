@@ -1882,7 +1882,7 @@ def build_parser() -> argparse.ArgumentParser:
     away_reset.add_argument("--project", default=None, help="Exact away project scope id.")
     away_reset.add_argument("--repo", default=None, help="Repository to resolve instead.")
     away_reset.add_argument("--json", action="store_true", help="JSON output")
-    # orch pause / orch resume (F17)
+    # orch pause / orch resume
     pause_parser = subparsers.add_parser(
         "pause",
         help="Stop all work now: start nothing new and park running workers.",
@@ -2041,7 +2041,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_block.add_argument("--json", action="store_true", help="JSON output")
 
-    # orch vendor status|check|smoke|pin|unpin|smoke-model (F18, ADR-0031).
+    # orch vendor status|check|smoke|pin|unpin|smoke-model (ADR-0031).
     vendor_parser = subparsers.add_parser(
         "vendor",
         help="Vendor CLI health after an update: status, check, smoke, pin.",
@@ -2320,7 +2320,7 @@ def build_parser() -> argparse.ArgumentParser:
     questions_audit.add_argument("--json", action="store_true", help="JSON output")
     _add_store_arg(questions_audit)
 
-    # orch job submit|get|list|cancel (M2-3 job queue; each command calls
+    # orch job submit|get|list|cancel (job queue; each command calls
     # exactly one service function in saberops.jobs.service).
     job_parser = subparsers.add_parser(
         "job",
@@ -2771,8 +2771,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_repo_arg(project_notes_clear)
 
-    # F26: optional advisor route (off by default), a stronger plan model
-    # consulted read-only at three checkpoints and never used to write code.
+    # Optional advisor route (off by default): a stronger plan model
+    # consulted read-only on demand and never used to write code.
     project_advisor = project_sub.add_parser(
         "advisor",
         help="Show, set or turn off the optional read-only advisor route (F26).",
@@ -3205,7 +3205,7 @@ def handle_run(args: argparse.Namespace) -> int:
                 generation=owner.generation,
                 reason="execution_finished",
             )
-            # N16: a direct run has no job row, so the scheduler's job scan can
+            # A direct run has no job row, so the scheduler's job scan can
             # never deliver its terminal notice.  Record the same durable
             # once-per-key attempt here; job-owned runs are skipped inside.
             try:
@@ -3285,7 +3285,7 @@ def handle_run(args: argparse.Namespace) -> int:
         return 2
     attendance: Any | None = None
     if attended:
-        # F24: this command is the attended terminal session.  Its heartbeat is
+        # This command is the attended terminal session.  Its heartbeat is
         # what keeps the work gate open; closing the terminal or Ctrl-C ends
         # presence and the engine pauses the run at a safe point.
         from saberops.attendance import start_attendance
@@ -3296,8 +3296,8 @@ def handle_run(args: argparse.Namespace) -> int:
         note_presence_seen()
         gate = evaluate_gate(db=service.db)
         if gate.closed:
-            # Presence does not clear an owner pause, an away bound or F17's
-            # sticky pause; those need one explicit confirmation.
+            # Presence does not clear an owner pause, an away bound or a sticky
+            # pause; those need one explicit confirmation.
             attendance.stop()
             print(f"[!] {gate.label}: run `orch resume` first", file=sys.stderr)
             return 1
@@ -3306,7 +3306,7 @@ def handle_run(args: argparse.Namespace) -> int:
 
         gate = evaluate_gate(db=service.db)
         if gate.closed:
-            # F24: no presence, no work.  A detached run would keep spending
+            # No presence, no work.  A detached run would keep spending
             # after this terminal closes; --attended holds presence instead.
             print(
                 f"[!] {gate.label}: nothing starts. Run `orch run --attended` in "
@@ -3437,7 +3437,7 @@ def handle_cancel(args: argparse.Namespace) -> int:
         if job is None:
             print(f"Error: unknown run or job: {reference}", file=sys.stderr)
             return 1
-        # N4: a QUEUED job has no run to cancel; cancel the job record itself
+        # A QUEUED job has no run to cancel; cancel the job record itself
         # through the jobs service so it never starts.  Any other run-less job
         # reports its unchanged state (`cancelled: false`) instead of failing.
         from saberops.jobs.service import cancel_job as _cancel_job
@@ -3483,7 +3483,7 @@ def _resolve_cancel_reference(
     reference is resolved from the owner job store to its current run, or the
     newest recorded run when the job is no longer RUNNING.  The resolved job is
     returned too so a run-less (still QUEUED) job can be cancelled as a job
-    record rather than reported as unknown (N4).
+    record rather than reported as unknown.
     """
     from saberops.jobs.store import get_job
 
@@ -3673,7 +3673,7 @@ def handle_plan(args: argparse.Namespace) -> int:
 
 
 def _plan_store_for(args: argparse.Namespace) -> PlanStore:
-    """Resolve the Step 015 plan store for CLI args."""
+    """Resolve the plan store for CLI args."""
     raw = str(getattr(args, "store", "") or "").strip()
     if raw:
         return PlanStore(Path(raw).expanduser())
@@ -3924,7 +3924,7 @@ def handle_plan_file_submit(args: argparse.Namespace) -> int:
     from saberops.project_scope.plan_store import PlanStore
     from saberops.runtime_gate import register_lane_submit_gate
 
-    # F17: an owner-invoked activation skips only the planning-session check;
+    # An owner-invoked activation skips only the planning-session check;
     # an explicit pause still stops every lane submission.
     register_lane_submit_gate()
     path = str(args.path)
@@ -5573,7 +5573,7 @@ def handle_project_show(args: argparse.Namespace) -> int:
 
 
 def _project_registry_for(args: argparse.Namespace) -> ProjectRegistry:
-    """Resolve the Step 015 stable project registry for CLI args."""
+    """Resolve the stable project registry for CLI args."""
     raw = str(getattr(args, "registry", "") or "").strip()
     if raw:
         return ProjectRegistry(Path(raw).expanduser())
@@ -5598,7 +5598,7 @@ def _print_registered_projects(projects: tuple[RegisteredProject, ...], as_json:
 
 
 def handle_project_list(args: argparse.Namespace) -> int:
-    """Handle ``orch project list`` (Step 015 stable registry)."""
+    """Handle ``orch project list`` (stable registry)."""
     from saberops.project import ProjectRegistrationError
 
     try:
@@ -5880,7 +5880,7 @@ def handle_project_notes_clear(args: argparse.Namespace) -> int:
 
 
 def handle_project_advisor_show(args: argparse.Namespace) -> int:
-    """Handle ``orch project advisor show`` (F26)."""
+    """Handle ``orch project advisor show``."""
     from saberops.advisor import AdvisorConfigError, load_advisor_route
 
     try:
@@ -5909,7 +5909,7 @@ def handle_project_advisor_show(args: argparse.Namespace) -> int:
 
 
 def handle_project_advisor_set(args: argparse.Namespace) -> int:
-    """Handle ``orch project advisor set PROVIDER MODEL`` (F26)."""
+    """Handle ``orch project advisor set PROVIDER MODEL``."""
     from saberops.advisor import (
         PLAN_ROUTE_PROVIDERS,
         AdvisorConfigError,
@@ -5946,7 +5946,7 @@ def handle_project_advisor_set(args: argparse.Namespace) -> int:
 
 
 def handle_project_advisor_off(args: argparse.Namespace) -> int:
-    """Handle ``orch project advisor off`` (F26)."""
+    """Handle ``orch project advisor off``."""
     from saberops.advisor import AdvisorConfigError, clear_advisor_route
 
     try:
@@ -5963,7 +5963,7 @@ def handle_project_advisor_off(args: argparse.Namespace) -> int:
 
 
 def handle_advisor(args: argparse.Namespace) -> int:
-    """Handle ``orch advisor ask`` (F26, on-demand advisor, ADR-0034)."""
+    """Handle ``orch advisor ask`` (on-demand advisor, ADR-0034)."""
     from saberops.advisor import AdvisorRefused, ask_advisor
     from saberops.db import Database, get_default_db_path
     from saberops.workers.registry import AdapterRegistry
@@ -6610,7 +6610,7 @@ def handle_away_reset_breaker(args: argparse.Namespace) -> int:
 
 
 def handle_pause(args: argparse.Namespace) -> int:
-    """Handle `orch pause [--show]` (F17 owner-only instant stop)."""
+    """Handle `orch pause [--show]` (owner-only instant stop)."""
     from saberops.db import Database as _Database
     from saberops.pause_work import pause_now
     from saberops.runtime_gate import gate_view
@@ -6640,7 +6640,7 @@ def handle_pause(args: argparse.Namespace) -> int:
 
 
 def handle_resume(args: argparse.Namespace) -> int:
-    """Handle `orch resume` (F17 explicit confirmation)."""
+    """Handle `orch resume` (explicit confirmation)."""
     from saberops.db import Database as _Database
     from saberops.pause_work import resume_work
 
@@ -7240,7 +7240,7 @@ def handle_questions_moot(args: argparse.Namespace) -> int:
 
 
 def handle_questions_standing_rules(args: argparse.Namespace) -> int:
-    """Handle `orch questions standing-rules` (proposals for CFG-1)."""
+    """Handle `orch questions standing-rules` (proposals for the workflow configuration)."""
     try:
         proposals = _questions_queue(args).standing_rule_proposals(int(args.threshold))
     except QuestionError as exc:
@@ -7645,7 +7645,7 @@ def handle_job_note_discard(args: argparse.Namespace) -> int:
 def _scheduler_storage_callbacks(
     db: Database,
 ) -> tuple[Any, Any]:
-    """Build the GS-1 (maintenance, launch-guard) callbacks for the scheduler.
+    """Build the storage-maintenance and launch-guard callbacks for the scheduler.
 
     On construction failure neither callback is ``None`` silently: the
     maintenance callback degrades to a typed reason and the guard degrades to
@@ -7679,10 +7679,8 @@ def _scheduler_storage_callbacks(
 def handle_scheduler_start(args: argparse.Namespace) -> int:
     """Handle `orch scheduler start`: one detached scheduler, then return.
 
-    The F25 walkthrough used to hand a non-technical owner the blocking
-    ``orch scheduler run``; this is the same engine start the web UI performs,
-    so an agent step can start the background helper without holding a
-    terminal.
+    This is the same non-blocking engine start the web UI performs, so an
+    agent step can start the background helper without holding a terminal.
     """
     from types import SimpleNamespace
 
@@ -7808,7 +7806,7 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
 
 
 def handle_vendor(args: argparse.Namespace) -> int:
-    """Handle `orch vendor status|check|smoke|pin|unpin|smoke-model` (F18)."""
+    """Handle `orch vendor status|check|smoke|pin|unpin|smoke-model`."""
     from saberops import vendor_health
     from saberops.db import Database as _Database
     from saberops.vendor_cli_fixtures import ManifestUnavailable
@@ -7946,7 +7944,7 @@ def handle_capacity_show(args: argparse.Namespace) -> int:
     from saberops.jobs.service import serialize_capacity_view as _serialize_capacity
 
     db_path = getattr(args, "db", None)
-    # Open read-only to honour D5 lifecycle rule: create nothing, write nothing on read
+    # Open read-only to honour the lifecycle rule: create nothing, write nothing on read
     db = _Database(db_path, read_only=True) if db_path else _Database(read_only=True)
 
     try:
@@ -7986,7 +7984,7 @@ def handle_capacity_show(args: argparse.Namespace) -> int:
 
 
 def handle_mcp(args: argparse.Namespace) -> int:
-    """Handle `orch mcp [serve|tools]` (stdio MCP server for the D7 tools)."""
+    """Handle `orch mcp [serve|tools]` (stdio MCP server for the tools)."""
     from saberops.mcp.protocol import McpServer
     from saberops.mcp.stdio import build_server_context, serve_stdio
 
@@ -8652,7 +8650,7 @@ def main(argv: list[str] | None = None) -> int:
     """Main CLI entrypoint."""
     parser = build_parser()
     normalized = list(sys.argv[1:] if argv is None else argv)
-    # `orch plan show|validate ...` addresses the Step 015 plan store, while
+    # `orch plan show|validate ...` addresses the plan store, while
     # `orch plan <run_id>` keeps its legacy run-plan contract. argparse cannot
     # mix an optional positional with subparsers (a run ID would be mistaken
     # for a subcommand), so the store verbs live on the `plan-store`

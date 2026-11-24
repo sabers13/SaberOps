@@ -121,7 +121,7 @@ class LeaseRecord:
     epoch: int = 0
     last_activity: float = 0.0
     db_path: str = ""
-    #: F17: liveness heartbeat written by the connected stdio server.  It is
+    #: Liveness heartbeat written by the connected stdio server.  It is
     #: deliberately separate from ``last_activity`` (which drives idle
     #: takeover) so an open-but-idle session keeps its idle handoff behaviour
     #: while a crashed or disconnected one is still detected.
@@ -412,7 +412,7 @@ class OrchestratorLease:
             return False
 
     def touch(self) -> bool:
-        """Refresh this session's liveness heartbeat (F17 presence detection).
+        """Refresh this session's liveness heartbeat (presence detection).
 
         Only the current writer touches its own record.  A read-only client, a
         missing record or a record owned by another process is left alone, so a

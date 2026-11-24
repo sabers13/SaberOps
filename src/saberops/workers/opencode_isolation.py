@@ -1,7 +1,7 @@
-"""Private config/home isolation for every OpenCode CLI launch (HV-2).
+"""Private config/home isolation for every OpenCode CLI launch.
 
-``--pure``/``--dir`` were removed in Step 024 (HV-2) because the installed
-``opencode v2.0.29`` help documents neither.  This module is the replacement
+The installed ``opencode v2.0.29`` help documents neither
+``--pure`` nor ``--dir``.  This module is the replacement
 guard: it gives each OpenCode child a private, disposable config/home root and
 disables project/ancestor configuration discovery, so no user, project or
 ancestor configuration, plugin, MCP server or skill can be discovered or

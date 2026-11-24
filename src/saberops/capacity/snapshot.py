@@ -1,4 +1,4 @@
-"""Routing seam: effective quota states with expiry + exclusions (M2-1 F)."""
+"""Routing seam: effective quota states with expiry + exclusions."""
 
 from __future__ import annotations
 
