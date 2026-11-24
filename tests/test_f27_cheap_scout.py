@@ -98,7 +98,7 @@ def _run_job(
     _tick(db)
     job = get_job(db, submitted.job.job_id)
     assert job is not None and job.current_run_id is not None
-    run = rig.wait_for_run(job.current_run_id, timeout=30.0)
+    run = rig.wait_for_run(job.current_run_id, timeout=90.0)
     assert run.status == RunStatus.COMPLETED, run.result_summary
     attempts = db.get_attempts_for_run(run.id)
     assert attempts

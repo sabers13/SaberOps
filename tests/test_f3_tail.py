@@ -120,7 +120,9 @@ def _start_supervised(
 
 def _run_to_completion(rig: RigEnvironment, *, task: str) -> Run:
     run_id = _start_supervised(rig, task=task)
-    return rig.wait_for_run(run_id, timeout=45.0)
+    # Stall detector, not a product timeout (H29): 45 s was sized for an idle
+    # host and failed a busy one.
+    return rig.wait_for_run(run_id, timeout=90.0)
 
 
 def _wait_until(predicate: Any, *, timeout: float, interval: float = 0.2) -> None:

@@ -99,6 +99,10 @@ pytestmark = [
     pytest.mark.packaged_routing_default,
     pytest.mark.slow,
     pytest.mark.serial,
+    # H29: keep the outer bound above every in-test drill bound (120 s drills,
+    # 300 s ten-task table) so a slow host reports the drill's own assertion
+    # instead of an opaque pytest-timeout.
+    pytest.mark.timeout(480),
 ]
 
 

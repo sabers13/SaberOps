@@ -163,16 +163,6 @@ def _make_job(
     )
 
 
-@pytest.fixture(autouse=True)
-def _hermetic_memory_admission(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Do not let other lanes' load park these dispatch tests with MEMORY_LOW.
-
-    The guard itself is unchanged; only the real host reading is bypassed here.
-    tests/test_c1_memory_ledger.py keeps exercising the guard.
-    """
-    monkeypatch.setenv("SABEROPS_GATE_MEMORY_GUARD", "0")
-
-
 @pytest.fixture
 def owner_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Database:
     config_dir = tmp_path / "config"

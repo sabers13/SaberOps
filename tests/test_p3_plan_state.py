@@ -297,10 +297,12 @@ def _run_real_job(rig: RigEnvironment) -> Run:
             provider_override="codex",
             model_override="gpt-5.6-terra",
             max_attempts=1,
-            worker_timeout=15,
-            gate_timeout=15,
+            # Test-only stall bounds (H29): the run is awaited at 90 s below;
+            # 15 s per phase was sized for an idle host.
+            worker_timeout=60,
+            gate_timeout=60,
             review_enabled=True,
-            review_timeout=15,
+            review_timeout=60,
         )
     )
     started = RunSupervisor(db=rig.db()).start_supervised_run(config)

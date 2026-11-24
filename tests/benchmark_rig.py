@@ -58,7 +58,12 @@ from saberops.supervisor import RunSupervisor
 #: (about 70s for the ten tasks on an idle host), and the gate's parallel pass
 #: runs this under heavy CPU contention, so the stall bound keeps headroom while
 #: still failing a genuinely stuck engine well inside the lane timeout.
-BENCHMARK_TIMEOUT_SECONDS = 180.0
+#:
+#: H29: this bound used to equal pytest's own 180 s, so a loaded host produced
+#: an opaque ``TIMEOUT`` verdict instead of this assertion's message.  It is now
+#: 300 s, and ``tests/test_benchmark_rig.py`` carries a 480 s outer timeout
+#: marker so the in-test bound always wins.
+BENCHMARK_TIMEOUT_SECONDS = 300.0
 #: The phase 1 thresholds live with the drill catalogue in ``benchmark_core``
 #: so the results table and this harness cannot disagree.
 DRILL_VISIBLE_LIMIT_SECONDS = DRILL_LIMIT_SECONDS

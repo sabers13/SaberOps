@@ -26,6 +26,10 @@ from saberops.models import GateScratchMode
 from saberops.orchestrator import _run_configured_gate
 from saberops.verification_snapshot import fixed_snapshot, source_tree
 
+# H29: this module asserts the host memory guard itself, so conftest's
+# default (off for ordinary tests) does not apply here.
+pytestmark = pytest.mark.memory_guard
+
 
 def _init_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)

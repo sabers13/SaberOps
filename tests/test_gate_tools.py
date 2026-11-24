@@ -60,6 +60,7 @@ def test_keep_failed_cap(tmp_path: Path) -> None:
     assert not new.exists()
 
 
+@pytest.mark.memory_guard
 def test_memory_ledger_waits_and_acquires_when_released(tmp_path: Path) -> None:
     """Holding predicted budget blocks a second reservation until released."""
     avail = g.DESKTOP_RESERVE_BYTES + 2 * g.GB
@@ -81,6 +82,7 @@ def test_memory_ledger_waits_and_acquires_when_released(tmp_path: Path) -> None:
         pass
 
 
+@pytest.mark.memory_guard
 def test_small_steps_run_concurrently_while_heavy_waits(tmp_path: Path) -> None:
     """Small learned steps share remaining budget concurrently while heavy waits."""
     import threading
@@ -458,6 +460,18 @@ def test_flaky_report_missing_and_main_gate_failures(
     assert "n-fail-1" in text
 
 
+def _pin_zero_pressure(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin zero host PSI so other lanes' load cannot park these ledger tests."""
+    pressure = path / "memory.pressure"
+    pressure.write_text(
+        "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+        "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(g.PROC_PRESSURE_MEMORY_ENV, str(pressure))
+
+
+@pytest.mark.memory_guard
 def test_exclusive_passthrough_and_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -465,6 +479,7 @@ def test_exclusive_passthrough_and_timeout(
     import subprocess
 
     repo = tmp_path / "repo"
+    _pin_zero_pressure(tmp_path, monkeypatch)
     repo.mkdir()
     _init_main_repo(repo)
     monkeypatch.chdir(repo)
@@ -497,6 +512,7 @@ def test_exclusive_passthrough_and_timeout(
         assert code == 3
 
 
+@pytest.mark.memory_guard
 def test_exclusive_orders_after_heavy_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -505,6 +521,7 @@ def test_exclusive_orders_after_heavy_release(
     import threading
 
     repo = tmp_path / "repo"
+    _pin_zero_pressure(tmp_path, monkeypatch)
     repo.mkdir()
     _init_main_repo(repo)
     monkeypatch.chdir(repo)

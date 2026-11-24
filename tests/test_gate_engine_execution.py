@@ -32,6 +32,10 @@ from saberops.gate_runner import (
     host_disk_admission,
 )
 
+# H29: this module asserts the host memory guard itself, so conftest's
+# default (off for ordinary tests) does not apply here.
+pytestmark = pytest.mark.memory_guard
+
 
 def _pin_mem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget_bytes: int) -> Path:
     avail_kb = (gt.DESKTOP_RESERVE_BYTES + budget_bytes) // 1024

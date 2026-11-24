@@ -55,24 +55,6 @@ _REVIEWER_MODEL = "h4-reviewer"
 _CONNECTION = "h4-conn"
 
 
-@pytest.fixture()
-def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    state = tmp_path / "state"
-    config = tmp_path / "config"
-    cache = tmp_path / "cache"
-    for directory in (state, config, cache):
-        directory.mkdir(parents=True)
-    monkeypatch.setenv("XDG_STATE_HOME", str(state))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
-    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
-    monkeypatch.setenv("ORCH_BINDING_STORE", str(tmp_path / "bindings.json"))
-    monkeypatch.setenv("ORCH_ACCESS_STORE", str(tmp_path / "access.json"))
-    monkeypatch.setenv("ORCH_ACCESS_MODELS_STORE", str(tmp_path / "models.json"))
-    monkeypatch.setenv("ORCH_READINESS_STORE", str(tmp_path / "readiness.json"))
-    return tmp_path
-
-
 def _seed_posture(config_home: Path) -> None:
     cfg_dir = config_home / "saberops"
     cfg_dir.mkdir(parents=True, exist_ok=True)

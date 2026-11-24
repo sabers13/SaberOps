@@ -72,7 +72,12 @@ LANES: list[dict[str, Any]] = [
 def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[RigEnvironment]:
     environment = build_lifecycle_rig(tmp_path, monkeypatch)
     monkeypatch.delenv("SABEROPS_RUNTIME_GATE", raising=False)
-    monkeypatch.setenv("SABEROPS_PLANNING_HEARTBEAT_TIMEOUT", "60")
+    # Presence must stay live for the whole test.  A wave runs three real runs,
+    # which takes longer than an idle host's minute under the gate's parallel
+    # load, and an expired heartbeat silently skips the refresh these tests
+    # assert (H29: the module's most frequent flake).  The pause drill closes
+    # the session by releasing the lease, not by waiting out a heartbeat, so
+    # conftest's long default is right here.
     yield environment
     try:
         OrchestratorLease().release()
@@ -176,6 +181,11 @@ def _run_lane(
     job = _lane_job(db, lane_id)
     assert job.state is JobState.QUEUED, job.state
     rig.set_worker_mode("commit", target_file=target_file, content=content)
+    # Test-only stall bounds, not product timeouts: the run is awaited below at
+    # 90 s, and 15 s per phase was sized for an idle host.  Under the gate's
+    # parallel load a worktree, gate or reviewer launch can take longer than
+    # that (H29, so-testprof §3.1), which failed the run instead of detecting a
+    # stuck one.
     config: RunConfig = resolve_effective_run_config(
         RunRequest(
             task=f"p6 lane {lane_id}",
@@ -183,10 +193,10 @@ def _run_lane(
             provider_override="codex",
             model_override="gpt-5.6-terra",
             max_attempts=1,
-            worker_timeout=15,
-            gate_timeout=15,
+            worker_timeout=60,
+            gate_timeout=60,
             review_enabled=True,
-            review_timeout=15,
+            review_timeout=60,
         )
     )
     started = RunSupervisor(db=rig.db()).start_supervised_run(config)

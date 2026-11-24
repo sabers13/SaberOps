@@ -6,6 +6,10 @@ tests that never write a user routing file were built on the v0.4.0 packaged
 chains, so they keep reading that exact document from
 ``tests/fixtures/routing_v040_default.json``. Tests about the real packaged
 file opt out with ``@pytest.mark.packaged_routing_default``.
+
+H29 (ADR-0092) also keeps here the two owner-store isolation fixtures the suite
+had copied thirteen times, and turns the gate's *host* memory guard off for
+every test unless the test asks for it with ``@pytest.mark.memory_guard``.
 """
 
 from __future__ import annotations
@@ -28,6 +32,10 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "no_attendance: do not hold a test attended terminal (presence tests)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "memory_guard: hold the host gate memory guard on (guard contract tests)",
     )
 
 
@@ -122,7 +130,7 @@ def _disable_desktop_notifications(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolated_memory_ledger(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[None]:
     """Keep every test off the real per-user shared gate memory ledger.
 
@@ -131,7 +139,21 @@ def _isolated_memory_ledger(
     register there, or a concurrent lane's gate can freeze the test's launch
     and leave it stuck.  The ledger lives beside ``tmp_path`` so it is disposed
     with the test and shared only by that test's own subprocesses.
+
+    Admission is still a *host* rule: it reads the real ``MemAvailable`` and
+    waits for a budget sibling lanes' gates already hold, so an ordinary test
+    that admits against the host turns another lane's load into a
+    pytest-timeout victim (``data/so-testprof/report.md`` §4.3b: 22 tests hit
+    the 180 s cap inside ``MemoryLedger.acquire``).  Ordinary tests therefore
+    admit without the guard; its own contract tests carry
+    ``@pytest.mark.memory_guard`` and get it back.  The predicted peak, the
+    grant, the learned sizes and the worker count are unchanged --- only the
+    wait/refusal that reads live host memory is skipped.
     """
+    monkeypatch.setenv(
+        "SABEROPS_GATE_MEMORY_GUARD",
+        "1" if request.node.get_closest_marker("memory_guard") is not None else "0",
+    )
     monkeypatch.setenv(
         "SABEROPS_MEMORY_LEDGER", str(tmp_path.parent / f"{tmp_path.name}-memory-ledger")
     )
@@ -141,3 +163,51 @@ def _isolated_memory_ledger(
         "SABEROPS_PROC_PRESSURE_MEMORY", str(tmp_path.parent / f"{tmp_path.name}-no-psi")
     )
     yield
+
+
+@pytest.fixture()
+def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """One owner store, cache and binding/access/readiness store per test.
+
+    H29 merged the eight byte-identical copies of this fixture (accept, CLI
+    parity, control-plane bindings, H4 review, H7 resume, readiness, review,
+    service).  A file that needs a different shape keeps its own local
+    ``isolated``, which wins over this one.
+    """
+    state = tmp_path / "state"
+    config = tmp_path / "config"
+    cache = tmp_path / "cache"
+    for directory in (state, config, cache):
+        directory.mkdir(parents=True)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+    monkeypatch.setenv("ORCH_BINDING_STORE", str(tmp_path / "bindings.json"))
+    monkeypatch.setenv("ORCH_ACCESS_STORE", str(tmp_path / "access.json"))
+    monkeypatch.setenv("ORCH_ACCESS_MODELS_STORE", str(tmp_path / "models.json"))
+    monkeypatch.setenv("ORCH_READINESS_STORE", str(tmp_path / "readiness.json"))
+    return tmp_path
+
+
+@pytest.fixture()
+def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One owner state/config tree per test, with no inherited binding stores.
+
+    H29 merged the five near-identical copies (accept, control-plane bindings,
+    web, web identity, web shell).  The shared body deletes all four ``ORCH_*``
+    store overrides; a test that sets one afterwards still wins.
+    """
+    state = tmp_path / "state"
+    config = tmp_path / "config"
+    state.mkdir(parents=True)
+    config.mkdir(parents=True)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    for variable in (
+        "ORCH_ACCESS_STORE",
+        "ORCH_ACCESS_MODELS_STORE",
+        "ORCH_BINDING_STORE",
+        "ORCH_READINESS_STORE",
+    ):
+        monkeypatch.delenv(variable, raising=False)

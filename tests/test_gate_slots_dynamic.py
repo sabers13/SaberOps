@@ -23,6 +23,10 @@ from saberops.gate_runner import (
     total_memory_bytes,
 )
 
+# H29: this module asserts the host memory guard itself, so conftest's
+# default (off for ordinary tests) does not apply here.
+pytestmark = pytest.mark.memory_guard
+
 _DEAD_PID = 999_999_999
 
 

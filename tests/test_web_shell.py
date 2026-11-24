@@ -8,24 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from saberops.web import create_app
-
-
-@pytest.fixture()
-def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    state = tmp_path / "state"
-    config = tmp_path / "config"
-    state.mkdir(parents=True)
-    config.mkdir(parents=True)
-    monkeypatch.setenv("XDG_STATE_HOME", str(state))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
-    monkeypatch.delenv("ORCH_ACCESS_STORE", raising=False)
-    monkeypatch.delenv("ORCH_ACCESS_MODELS_STORE", raising=False)
-    monkeypatch.delenv("ORCH_BINDING_STORE", raising=False)
-    monkeypatch.delenv("ORCH_READINESS_STORE", raising=False)
 
 
 def _client(tmp_path: Path) -> TestClient:

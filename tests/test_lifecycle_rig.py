@@ -368,7 +368,7 @@ def test_lifecycle_happy_path_via_scheduler(rig: RigEnvironment) -> None:
     job = get_job(db, submitted.job.job_id)
     assert job is not None and job.current_run_id is not None
 
-    run = rig.wait_for_run(job.current_run_id, timeout=15.0)
+    run = rig.wait_for_run(job.current_run_id, timeout=90.0)
     assert run.status == RunStatus.COMPLETED, run.result_summary
 
     accepted = AcceptEngine(db=db).accept_run(run.id)
@@ -406,7 +406,7 @@ def _dispatch_one_job(rig: RigEnvironment, requirements: JobRequirements) -> lis
     assert tick is not None and tick.ran and tick.dispatched == 1
     job = get_job(db, submitted.job.job_id)
     assert job is not None and job.current_run_id is not None
-    run = rig.wait_for_run(job.current_run_id, timeout=30.0)
+    run = rig.wait_for_run(job.current_run_id, timeout=90.0)
     assert run.status == RunStatus.COMPLETED, run.result_summary
     return db.get_attempts_for_run(run.id)
 
@@ -452,15 +452,18 @@ def _run_supervised_and_accept(
             provider_override=provider_override,
             model_override=model_override,
             max_attempts=1,
-            worker_timeout=10.0,
-            gate_timeout=10.0,
+            # Test-only stall bounds, not product timeouts: the run is awaited
+            # below at 90 s, and 10 s per phase was sized for an idle host
+            # (H29, so-testprof §3.1).
+            worker_timeout=60.0,
+            gate_timeout=60.0,
             review_enabled=True,
-            review_timeout=10.0,
+            review_timeout=60.0,
         )
     )
     supervisor = RunSupervisor(db=db)
     started = supervisor.start_supervised_run(config)
-    run = rig.wait_for_run(started.run_id, timeout=30.0)
+    run = rig.wait_for_run(started.run_id, timeout=90.0)
     assert run.status == RunStatus.COMPLETED, run.result_summary
 
     reviews = db.get_reviews_for_run(run.id)
@@ -761,14 +764,14 @@ def _run_to_terminal(rig: RigEnvironment, *, task: str, max_attempts: int = 3) -
             task=task,
             repo_path=rig.repo,
             max_attempts=max_attempts,
-            worker_timeout=10.0,
-            gate_timeout=10.0,
+            worker_timeout=60.0,
+            gate_timeout=60.0,
             review_enabled=True,
-            review_timeout=10.0,
+            review_timeout=60.0,
         )
     )
     started = RunSupervisor(db=db).start_supervised_run(config)
-    return rig.wait_for_run(started.run_id, timeout=60.0)
+    return rig.wait_for_run(started.run_id, timeout=90.0)
 
 
 def _catch_up_context(rig: RigEnvironment) -> Any:

@@ -23,19 +23,6 @@ from saberops.web import create_app
 _CREATED = "2026-09-23T10:00:00+00:00"
 
 
-@pytest.fixture()
-def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    state = tmp_path / "state"
-    config = tmp_path / "config"
-    state.mkdir(parents=True)
-    config.mkdir(parents=True)
-    monkeypatch.setenv("XDG_STATE_HOME", str(state))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
-    monkeypatch.delenv("ORCH_ACCESS_STORE", raising=False)
-    monkeypatch.delenv("ORCH_ACCESS_MODELS_STORE", raising=False)
-    monkeypatch.delenv("ORCH_BINDING_STORE", raising=False)
-
-
 def _client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(db_path=tmp_path / "web.db"), raise_server_exceptions=False)
 

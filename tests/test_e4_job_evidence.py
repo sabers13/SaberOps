@@ -124,10 +124,12 @@ def test_attempt_evidence_keeps_note_versions_and_reported_identity(
             provider_override="opencode",
             model_override=REQUESTED_MODEL,
             max_attempts=2,
-            worker_timeout=30.0,
-            gate_timeout=10.0,
+            worker_timeout=60.0,
+            # Test-only stall bound (H29): 10 s per phase was sized for an idle
+            # host and failed the attempt under the gate's parallel load.
+            gate_timeout=60.0,
             review_enabled=True,
-            review_timeout=10.0,
+            review_timeout=60.0,
         )
     )
     db = rig.db()

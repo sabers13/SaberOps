@@ -126,14 +126,16 @@ def test_two_sibling_jobs_from_same_base_stale_second_preserves_work(
                 provider_override=provider,
                 model_override=model,
                 max_attempts=1,
-                worker_timeout=15.0,
-                gate_timeout=15.0,
+                # Test-only stall bounds (H29): a sibling job is awaited at
+                # 90 s below; 15 s per phase was sized for an idle host.
+                worker_timeout=60.0,
+                gate_timeout=60.0,
                 review_enabled=True,
-                review_timeout=15.0,
+                review_timeout=60.0,
             )
         )
         started = RunSupervisor(db=db).start_supervised_run(config)
-        run = rig.wait_for_run(started.run_id, timeout=30.0)
+        run = rig.wait_for_run(started.run_id, timeout=90.0)
         assert run.status == RunStatus.COMPLETED, run.result_summary
         return run.id
 
