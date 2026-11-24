@@ -494,14 +494,20 @@ def build_retry_projection(
         )
         stderr = getattr(prior_check, "stderr", None) or ""
         stdout = getattr(prior_check, "stdout", None) or ""
-        if stderr.strip():
-            excerpt = prune_evidence(stderr.strip(), limit=EVIDENCE_BLOCK_MAX_CHARS)
-            failure_parts.append(f"Gate stderr excerpt:\n{excerpt.text}")
-            if excerpt.truncated:
-                failure_parts.append("[truncated]")
-        elif stdout.strip():
-            excerpt = prune_evidence(stdout.strip(), limit=EVIDENCE_BLOCK_MAX_CHARS)
-            failure_parts.append(f"Gate stdout excerpt:\n{excerpt.text}")
+        # Both streams are projected.  A single warning on stderr used to hide
+        # the test summary on stdout from the next attempt, so the worker saw
+        # the warning and never the failing test.  The present streams share
+        # the one evidence block: two streams get half each, so the evidence
+        # keeps its size while a lone stream keeps the whole block as before.
+        streams = [
+            (label, stream.strip())
+            for label, stream in (("stderr", stderr), ("stdout", stdout))
+            if stream.strip()
+        ]
+        limit = EVIDENCE_BLOCK_MAX_CHARS // len(streams) if streams else 0
+        for label, stream in streams:
+            excerpt = prune_evidence(stream, limit=limit)
+            failure_parts.append(f"Gate {label} excerpt:\n{excerpt.text}")
             if excerpt.truncated:
                 failure_parts.append("[truncated]")
     failure_excerpt = "\n".join(failure_parts) if failure_parts else None
