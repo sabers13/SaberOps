@@ -1515,12 +1515,6 @@ class GcPreview:
     estimated_reclaimable_bytes: int | None
     preview_id: str
 
-    def candidate_for(self, reference: str) -> GcCandidate | None:
-        for candidate in self.candidates:
-            if candidate.reference == reference:
-                return candidate
-        return None
-
 
 def _policy_ref(policy: GcPolicy, policy_path: Path | None) -> str | None:
     if not policy.approved:
@@ -3186,9 +3180,6 @@ class StorageMaintenance:
         )
         return True
 
-
-def _null_audit(event: StorageAuditEvent) -> None:
-    del event
 
 
 def database_audit_sink(db: Database) -> AuditSink:

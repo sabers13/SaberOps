@@ -20,7 +20,6 @@ the ordinary launcher restores the checkpoint through ``prepare_resume``.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from saberops.runtime_gate import (
@@ -217,22 +216,3 @@ def resume_work(db: Any, *, by: str = "owner", now: Any = None) -> GateState:
     return cleared
 
 
-def paused_run_paths(db: Any) -> list[str]:
-    """Worktree paths of paused runs, for a return summary that shows the work."""
-    from saberops.jobs import store
-    from saberops.jobs.models import JobState, WaitingReason
-
-    paths: list[str] = []
-    try:
-        jobs, _ = store.list_jobs_tolerant(db, state=JobState.QUEUED, limit=10_000)
-    except Exception:
-        return paths
-    for job in jobs:
-        if job.waiting_reason is not WaitingReason.PAUSED:
-            continue
-        resume = job.resume_from
-        if resume is not None:
-            paths.append(str(resume.checkpoint_sha))
-        elif job.repo:
-            paths.append(str(Path(job.repo)))
-    return paths

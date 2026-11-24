@@ -270,9 +270,6 @@ class SandboxPolicy:
     def authorize_executable(self, executable: str) -> bool:
         return self.process.authorize_executable(executable)
 
-    def authorize_credential_ref(self, ref: str) -> bool:
-        return ref in self.credential_refs
-
     def authorize_host_shell(self) -> bool:
         return self.process.authorize_host_shell()
 

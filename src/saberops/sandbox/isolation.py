@@ -383,10 +383,6 @@ class WorkerIsolationPolicy:
                 return None
         return WorkerIsolationReason.OUTSIDE_WORKTREE
 
-    def authorize_path(self, path: str | os.PathLike[str]) -> bool:
-        """Return True iff ``path`` is inside the worktree or a scratch root."""
-        return self.location_of(os.path.realpath(os.fspath(path))) is None
-
     def protected_git_paths(self) -> tuple[str, ...]:
         """Absolute ``.git`` control-surface paths protected for this worktree.
 

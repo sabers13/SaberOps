@@ -76,17 +76,6 @@ VALIDATION_POLICY_TEXT = (
 )
 
 
-def with_validation_policy(task: str) -> str:
-    """Return ``task`` with the compact validation policy appended exactly once.
-
-    Idempotent: if the policy marker is already present the task is returned
-    unchanged, so composed prompt builders can never duplicate the policy.
-    """
-    stripped = task.rstrip()
-    if VALIDATION_POLICY_MARKER in stripped:
-        return stripped
-    return stripped + "\n\n" + VALIDATION_POLICY_TEXT
-
 
 def verification_contract(
     gate_command: str, gate_enabled: bool, review_disabled: bool

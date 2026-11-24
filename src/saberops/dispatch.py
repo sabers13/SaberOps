@@ -89,31 +89,6 @@ def _capacity_terms(admission: Any) -> dict[str, object] | None:
     }
 
 
-def refresh_quota_evidence(
-    db: Any,
-    *,
-    provider: str,
-    probes: Mapping[str, Any] | None = None,
-    policy: ControlPlanePolicy | None = None,
-    now: datetime | None = None,
-) -> str:
-    """Run the safe zero-inference probe seam for ``provider``.
-
-    Returns the probe outcome (``ran`` when fresh evidence was recorded).  The
-    caller re-reads quota states and re-decides; a probe that cannot run leaves
-    the original refusal standing.
-    """
-    from saberops.capacity.probes import try_safe_quota_probe
-    from saberops.control_plane.plans import effective_quota_pools
-
-    return try_safe_quota_probe(
-        db,
-        provider=provider,
-        now=now,
-        probes=dict(probes) if probes is not None else None,
-        pool_policies=effective_quota_pools(policy) if policy is not None else None,
-    )
-
 #: Skip reasons where readiness evidence participated in the decision.
 #: Callers use this to decide whether readiness state/reason/connection
 #: fields belong on the durable skip record.

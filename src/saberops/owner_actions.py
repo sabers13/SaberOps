@@ -47,7 +47,6 @@ import sys
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -275,10 +274,6 @@ class OwnerActionSummary:
     last_review: RunOwnerAction | None
     last_accept: RunOwnerAction | None
 
-
-def now_iso_timestamp() -> str:
-    """Return the current UTC timestamp in ISO 8601 format."""
-    return datetime.now(UTC).isoformat()
 
 
 def bound_action_text(raw: str | None) -> str | None:

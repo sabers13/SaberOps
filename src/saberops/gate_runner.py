@@ -1764,8 +1764,6 @@ class GateSlotWaitTimeout(RuntimeError):
 # ---------------------------------------------------------------------------
 
 GIB: Final[int] = _gt.GB
-DEFAULT_SLOT_WAIT_SECONDS: Final[float] = _gt.DEFAULT_MEMORY_WAIT
-
 read_meminfo = _gt.read_meminfo
 total_memory_bytes = _gt.total_memory_bytes
 available_memory_bytes = _gt.available_memory_bytes
@@ -1908,35 +1906,6 @@ def host_disk_admission(
     return None
 
 
-def _read_test_sources(repo: Path, paths: Sequence[str], *, head: str) -> dict[str, str]:
-    """Read ``path -> source`` for the given paths at ``head`` (empty on miss)."""
-    sources: dict[str, str] = {}
-    for path in paths:
-        completed = subprocess.run(
-            ["git", "show", f"{head}:{path}"],
-            cwd=repo,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode == 0:
-            sources[path] = completed.stdout
-    return sources
-
-
-def _read_quarantine(repo: Path) -> frozenset[str]:
-    path = repo / "tests/quarantine.txt"
-    if not path.exists():
-        return frozenset()
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return frozenset()
-    return frozenset(
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    )
 
 
 # ---------------------------------------------------------------------------

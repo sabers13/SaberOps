@@ -88,11 +88,7 @@ SCHEMA_VERSION: Final[int] = 1
 DEFAULT_HEARTBEAT_TIMEOUT_SECONDS: Final[float] = 60.0
 
 #: Default cadence of the unattended digest notice.
-DEFAULT_DIGEST_SECONDS: Final[float] = 3600.0
-
 HEARTBEAT_TIMEOUT_ENV: Final[str] = "SABEROPS_PLANNING_HEARTBEAT_TIMEOUT"
-DIGEST_SECONDS_ENV: Final[str] = "SABEROPS_DIGEST_SECONDS"
-
 
 class RuntimeGateError(ValueError):
     """Fail-closed error for an unreadable or malformed gate document."""
@@ -355,13 +351,6 @@ def heartbeat_timeout() -> float:
     """The shared presence-heartbeat timeout in seconds."""
     return _heartbeat_timeout()
 
-
-def _digest_seconds() -> float:
-    try:
-        value = float(os.environ.get(DIGEST_SECONDS_ENV, "").strip() or "0")
-    except ValueError:
-        return DEFAULT_DIGEST_SECONDS
-    return value if value > 0 else DEFAULT_DIGEST_SECONDS
 
 
 # --------------------------------------------------------------------------- #

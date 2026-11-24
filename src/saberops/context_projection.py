@@ -426,39 +426,6 @@ class SurgicalCapsule:
         "Apply the bounded fix only; verify with focused tests and return the candidate."
     )
 
-    def to_projection(self, role: str = "BUILD") -> ContextProjection:
-        """Return the :class:`ContextProjection` for this capsule."""
-        change_section: list[tuple[str, str]] = []
-        if self.bounded_stdout_excerpt:
-            change_section.append(("STDOUT EXCERPT", self.bounded_stdout_excerpt))
-        if self.bounded_stderr_excerpt:
-            change_section.append(("STDERR EXCERPT", self.bounded_stderr_excerpt))
-        if self.failing_check_command or self.failing_exit_code is not None:
-            details = []
-            if self.failing_check_command:
-                details.append(f"command: {self.failing_check_command}")
-            if self.failing_exit_code is not None:
-                details.append(f"exit_code: {self.failing_exit_code}")
-            change_section.append(("FAILING CHECK", "\n".join(details)))
-        return ContextProjection(
-            mode=DispatchContextMode.SURGICAL,
-            role=role,
-            parent_slug=self.parent_slug,
-            inherited_candidate_sha=self.inherited_candidate_sha,
-            dispatch_reason=self.dispatch_reason,
-            responsibility=self.bounded_defect,
-            invariants=self.invariants_to_preserve,
-            changed_paths=self.changed_paths,
-            diff_ref=self.diff_ref,
-            failure_excerpt=(
-                self.blocking_review_finding if self.blocking_review_finding else None
-            ),
-            full_parent_included=False,
-            source_original_task_bytes=self.source_original_task_bytes,
-            focused_verification=self.focused_verification,
-            extra_sections=tuple(change_section),
-        )
-
 
 # ---------------------------------------------------------------------------
 # Convenience builders used by Orchestrator to construct projections.

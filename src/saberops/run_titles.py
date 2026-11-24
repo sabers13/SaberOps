@@ -59,12 +59,6 @@ def fallback_title(task: str, repo: str = "") -> str:
     return clean_title(text, repo) or "Engineering task"
 
 
-def chat_title(task: str, repo: str = "") -> str:
-    """Keep conversations distinguishable from implementation runs."""
-    title = fallback_title(task, repo)
-    title = re.sub(r"^(?:build|implement|fix|add|create|improve)\s+", "", title, flags=re.I)
-    return clean_title(f"Discuss {title}", repo)
-
 
 def unique_title(title: str, existing: list[str]) -> str:
     """Reserve a readable, case-insensitive label with a stable collision suffix."""

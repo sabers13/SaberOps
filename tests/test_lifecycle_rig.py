@@ -824,7 +824,10 @@ def test_quota_exhausted_attempt_continues_on_another_binding_from_checkpoint(
     assert first.interruption_reason == WorkerInterruptionReason.QUOTA_EXHAUSTED.value
 
     # The partial work survived as a checkpoint on the first attempt's own branch.
-    checkpoint = db.get_worker_checkpoint_for_attempt(run.id, first.id)
+    checkpoint = next(
+        c for c in db.get_worker_checkpoints_for_run(run.id)
+        if c.source_attempt_id == first.id
+    )
     assert checkpoint is not None, "no checkpoint recorded for the quota-exhausted attempt"
     assert checkpoint.reason == WorkerInterruptionReason.QUOTA_EXHAUSTED.value
     assert checkpoint.checkpoint_sha != rig.base_sha

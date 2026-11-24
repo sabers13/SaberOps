@@ -79,17 +79,6 @@ class SessionJournal:
                 ).fetchone()[0]
             )
 
-    def last_turn(self, sid: str) -> dict[str, Any]:
-        if not self.path.is_file():
-            return {}
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT payload FROM events WHERE session_id=? AND kind='turn.completed' "
-                "ORDER BY sequence DESC LIMIT 1",
-                (sid,),
-            ).fetchone()
-        return dict(json.loads(row[0])) if row else {}
-
     def process(self, sid: str, identity: dict[str, Any]) -> None:
         with self.connect(write=True) as conn:
             conn.execute(

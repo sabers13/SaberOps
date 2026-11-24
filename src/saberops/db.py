@@ -6,9 +6,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -242,8 +241,6 @@ class Database:
         self._read_only = read_only
         if not read_only:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._listeners: list[Callable[[str, int], None]] = []
-        self._listeners_lock = threading.Lock()
         self._plan_schema_available = True
         # Run state is project-local, but provider/account quota is owner-wide
         # configuration and stays in one global store shared by every project.
@@ -256,18 +253,6 @@ class Database:
     def owner_db(self) -> Database:
         """Return the database holding owner-wide (cross-project) configuration."""
         return self._owner_db if self._owner_db is not None else self
-
-    def add_event_listener(self, callback: Callable[[str, int], None]) -> None:
-        """Register an in-process callback invoked after any event is recorded."""
-        with self._listeners_lock:
-            if callback not in self._listeners:
-                self._listeners.append(callback)
-
-    def remove_event_listener(self, callback: Callable[[str, int], None]) -> None:
-        """Unregister an in-process event callback."""
-        with self._listeners_lock:
-            if callback in self._listeners:
-                self._listeners.remove(callback)
 
     @contextmanager
     def _get_connection(self) -> Iterator[sqlite3.Connection]:
@@ -1069,98 +1054,6 @@ class Database:
                     return None
                 raise
         return str(row[0]) if row else None
-
-    def inherit_continuation_plan(self, parent_id: str, child_id: str, sha: str) -> None:
-        """Atomically clone the frozen plan footprint, keeping completed prerequisites."""
-        with self._get_connection() as conn:
-            parent = conn.execute("SELECT * FROM run_plans WHERE run_id=?", (parent_id,)).fetchone()
-            if parent is None:
-                return
-            if conn.execute("SELECT 1 FROM run_plans WHERE run_id=?", (child_id,)).fetchone():
-                return  # Recovery adopts the already durable child plan.
-            steps = [
-                dict(r)
-                for r in conn.execute(
-                    "SELECT * FROM plan_steps WHERE run_id=? ORDER BY ordering", (parent_id,)
-                )
-            ]
-            packages = [
-                dict(r)
-                for r in conn.execute("SELECT * FROM work_packages WHERE run_id=?", (parent_id,))
-            ]
-            step_ids = {r["id"]: child_id + ":step:" + r["id"] for r in steps}
-            package_ids = {r["id"]: child_id + ":package:" + r["id"] for r in packages}
-            completed = {r["id"] for r in steps if r["status"] == "COMPLETED"}
-            plan = dict(parent)
-            now = current_iso_timestamp()
-            plan.update(
-                id=child_id + ":continued-plan",
-                run_id=child_id,
-                status="COMPLETED" if len(completed) == len(steps) else "ACTIVE",
-                created_at=now,
-                updated_at=now,
-            )
-
-            def insert(table: str, row: dict[str, Any]) -> None:
-                columns = ",".join('"' + key.replace('"', '""') + '"' for key in row)
-                marks = ",".join("?" for _ in row)
-                conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({marks})", tuple(row.values()))
-
-            insert("run_plans", plan)
-            for step in steps:
-                old_id = step["id"]
-                deps = json.loads(step["dependency_ids_json"])
-                step.update(
-                    id=step_ids[old_id],
-                    run_id=child_id,
-                    plan_id=plan["id"],
-                    dependency_ids_json=json.dumps([step_ids[d] for d in deps]),
-                    work_package_id=package_ids[step["work_package_id"]],
-                    status="COMPLETED"
-                    if old_id in completed
-                    else "READY"
-                    if all(d in completed for d in deps)
-                    else "PENDING",
-                    attempt_id=None,
-                    review_id=None,
-                    blocker=None,
-                    error=None,
-                    created_at=now,
-                    updated_at=now,
-                )
-                insert("plan_steps", step)
-            for package in packages:
-                package.update(
-                    id=package_ids[package["id"]],
-                    run_id=child_id,
-                    plan_step_id=step_ids[package["plan_step_id"]],
-                    base_candidate_sha=sha,
-                    dependency_package_ids_json=json.dumps(
-                        [package_ids[d] for d in json.loads(package["dependency_package_ids_json"])]
-                    ),
-                    created_at=now,
-                    updated_at=now,
-                )
-                if package["context_capsule_json"]:
-                    capsule = json.loads(package["context_capsule_json"])
-                    capsule["base_candidate_sha"] = sha
-                    package["context_capsule_json"] = json.dumps(capsule)
-                insert("work_packages", package)
-            conn.execute(
-                "INSERT INTO events(run_id,event_type,payload_json,created_at) VALUES (?,?,?,?)",
-                (
-                    child_id,
-                    "plan_created",
-                    json.dumps(
-                        {
-                            "plan_id": plan["id"],
-                            "package_count": len(packages),
-                            "continued_from": parent_id,
-                        }
-                    ),
-                    current_iso_timestamp(),
-                ),
-            )
 
     def _insert_run_pre_provenance(self, conn: sqlite3.Connection, run: Run) -> None:
         """Insert into a database predating the provenance columns.
@@ -2913,19 +2806,6 @@ class Database:
             for row in rows
         ]
 
-    def aggregate_provider_usage(self) -> list[dict[str, Any]]:
-        """Numeric recorded call activity by provider; unknown tokens stay NULL."""
-        with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT provider, count(*) AS calls, "
-                "sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens, "
-                "sum(cached_tokens) AS cached_tokens, max(created_at) AS updated_at, "
-                "sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL "
-                "THEN 1 ELSE 0 END) AS unknown_calls "
-                "FROM model_call_usage GROUP BY provider ORDER BY provider"
-            ).fetchall()
-        return [dict(row) for row in rows]
-
     def aggregate_model_call_usage(self, run_id: str) -> dict[str, object]:
         """Return deterministic run-level token totals and coverage."""
         from saberops.telemetry import aggregate_usage
@@ -3218,16 +3098,6 @@ class Database:
             )
             return [self._row_to_review(row) for row in cursor.fetchall()]
 
-    def get_latest_review(self, run_id: str) -> ReviewResult | None:
-        """Fetch the most recent review for a run if any."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM reviews WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
-                (run_id,),
-            )
-            row = cursor.fetchone()
-            return self._row_to_review(row) if row else None
-
     def count_launched_reviews(self, run_id: str) -> int:
         """Return total number of reviewer model calls actually launched for a run."""
         with self._get_connection() as conn:
@@ -3322,7 +3192,7 @@ class Database:
         attempt_id: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> int:
-        """Log an event and notify in-process listeners."""
+        """Log an event and wake local readers."""
         payload_str = json.dumps(payload) if payload is not None else None
         with self.write_transaction() as conn:
             cursor = conn.execute(
@@ -3335,18 +3205,9 @@ class Database:
             event_id = int(cursor.lastrowid) if cursor.lastrowid is not None else 0
             conn.commit()
 
-        with self._listeners_lock:
-            listeners = list(self._listeners)
-
-        for listener in listeners:
-            try:
-                listener(run_id, event_id)
-            except Exception:
-                pass  # Listener exceptions are swallowed and must never affect orchestration
-
-        # Detached execution owners write from their own process, so in-process
-        # listeners alone cannot wake the UI or ``orch wait``.  The durable log
-        # stays authoritative; this only says "there is something new to read".
+        # Detached execution owners write from their own process, so wake the
+        # local readers.  The durable log stays authoritative; this only says
+        # "there is something new to read".
         notify_run(self.db_path, run_id)
 
         return event_id
@@ -3375,8 +3236,8 @@ class Database:
 
         Returns ``(event_id, inserted)``: the existing event id with
         ``inserted=False`` when the decision was already durable, otherwise
-        the new event id with ``inserted=True``.  Listeners and the wake
-        notifier fire only when a new event was actually inserted.
+        the new event id with ``inserted=True``.  The wake notifier fires
+        only when a new event was actually inserted.
         """
         if not isinstance(run_id, str) or not run_id:
             raise ValueError("run_id must be a non-empty string")
@@ -3410,15 +3271,6 @@ class Database:
             )
             event_id = int(cursor.lastrowid) if cursor.lastrowid is not None else 0
             conn.commit()
-
-        with self._listeners_lock:
-            listeners = list(self._listeners)
-
-        for listener in listeners:
-            try:
-                listener(run_id, event_id)
-            except Exception:
-                pass  # Listener exceptions are swallowed and must never affect orchestration
 
         notify_run(self.db_path, run_id)
 
@@ -3504,23 +3356,6 @@ class Database:
 
     # Plan/supervision persistence uses normalized rows rather
     # than an opaque run blob so a reconnect can render and resume deterministically.
-    def create_run_plan(self, plan: RunPlan) -> None:
-        """Persist a new plan; duplicate IDs fail closed via the primary key."""
-        with self._get_connection() as conn:
-            conn.execute(
-                "INSERT INTO run_plans (id, run_id, status, version, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    plan.id,
-                    plan.run_id,
-                    plan.status.value,
-                    plan.version,
-                    plan.created_at,
-                    plan.updated_at,
-                ),
-            )
-            conn.commit()
-
     def get_run_plan(self, run_id: str) -> RunPlan | None:
         """Return the newest persisted plan, or ``None`` for a legacy run."""
         if not self._plan_schema_available:
@@ -3531,66 +3366,6 @@ class Database:
             ).fetchone()
             return self._row_to_plan(row) if row is not None else None
 
-    def list_run_plans(self, run_id: str) -> list[RunPlan]:
-        """Return every persisted plan for the run in deterministic order.
-
-        ``get_run_plan`` returns only the newest row and cannot prove that it
-        is the only one; recovery needs that authority, so this is the
-        deterministic ``(created_at, id)``-ordered list it consults instead.
-        """
-        if not self._plan_schema_available:
-            return []
-        with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM run_plans WHERE run_id = ? ORDER BY created_at ASC, id ASC",
-                (run_id,),
-            ).fetchall()
-            return [self._row_to_plan(row) for row in rows]
-
-    def update_run_plan(self, plan_id: str, status: PlanStatus, version: int | None = None) -> None:
-        """Update plan lifecycle/version without replacing its steps."""
-        now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            if version is None:
-                conn.execute(
-                    "UPDATE run_plans SET status = ?, updated_at = ? WHERE id = ?",
-                    (status.value, now, plan_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE run_plans SET status = ?, version = ?, updated_at = ? WHERE id = ?",
-                    (status.value, version, now, plan_id),
-                )
-            conn.commit()
-
-    def create_plan_step(self, step: PlanStep) -> None:
-        """Persist a stable plan step."""
-        with self._get_connection() as conn:
-            conn.execute(
-                """INSERT INTO plan_steps (id, plan_id, run_id, kind, title, goal, status, ordering,
-                   dependency_ids_json, work_package_id, attempt_id, review_id, blocker, error,
-                   created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    step.id,
-                    step.plan_id,
-                    step.run_id,
-                    step.kind,
-                    step.title,
-                    step.goal,
-                    step.status.value,
-                    step.ordering,
-                    json.dumps(list(step.dependency_ids)),
-                    step.work_package_id,
-                    step.attempt_id,
-                    step.review_id,
-                    step.blocker,
-                    step.error,
-                    step.created_at,
-                    step.updated_at,
-                ),
-            )
-            conn.commit()
-
     def get_plan_steps(self, run_id: str) -> list[PlanStep]:
         """Return plan steps in deterministic execution/display order."""
         if not self._plan_schema_available:
@@ -3600,39 +3375,6 @@ class Database:
                 "SELECT * FROM plan_steps WHERE run_id = ? ORDER BY ordering ASC, id ASC", (run_id,)
             ).fetchall()
             return [self._row_to_plan_step(row) for row in rows]
-
-    def update_plan_step(
-        self,
-        step_id: str,
-        status: PlanStepStatus,
-        *,
-        work_package_id: str | None = None,
-        attempt_id: str | None = None,
-        review_id: str | None = None,
-        blocker: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        """Transition one step and retain any absent linkage values."""
-        now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            row = conn.execute("SELECT * FROM plan_steps WHERE id = ?", (step_id,)).fetchone()
-            if row is None:
-                raise ValueError(f"unknown plan step: {step_id}")
-            conn.execute(
-                """UPDATE plan_steps SET status = ?, work_package_id = ?, attempt_id = ?, review_id = ?,
-                   blocker = ?, error = ?, updated_at = ? WHERE id = ?""",
-                (
-                    status.value,
-                    work_package_id if work_package_id is not None else row["work_package_id"],
-                    attempt_id if attempt_id is not None else row["attempt_id"],
-                    review_id if review_id is not None else row["review_id"],
-                    blocker if blocker is not None else row["blocker"],
-                    error if error is not None else row["error"],
-                    now,
-                    step_id,
-                ),
-            )
-            conn.commit()
 
     # ------------------------------------------------------------------
     # Run-scoped project-scope evidence written by an older build.
@@ -3658,52 +3400,6 @@ class Database:
             ).fetchall()
         return [{key: row[key] for key in row.keys()} for row in rows]
 
-    def create_work_package(self, package: WorkPackage) -> None:
-        """Persist a normalized coherent work package."""
-        with self._get_connection() as conn:
-            conn.execute(
-                """INSERT INTO work_packages (id, run_id, plan_step_id, parent_objective, goal,
-                   acceptance_criteria_json, dependency_package_ids_json, base_candidate_sha,
-                   constraints_json, relevant_paths_json, prerequisite_summaries_json, gate_required,
-                   capability_hint, tier_hint, long_running_hint, long_running, long_running_reason,
-                   context_capsule_json, scope_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    package.id,
-                    package.run_id,
-                    package.plan_step_id,
-                    package.parent_objective,
-                    package.goal,
-                    json.dumps(list(package.acceptance_criteria)),
-                    json.dumps(list(package.dependency_package_ids)),
-                    package.base_candidate_sha,
-                    json.dumps(list(package.constraints)),
-                    json.dumps(list(package.relevant_paths)),
-                    json.dumps(list(package.prerequisite_summaries)),
-                    1 if package.gate_required else 0,
-                    package.capability_hint,
-                    package.tier_hint,
-                    None if package.long_running_hint is None else int(package.long_running_hint),
-                    int(package.long_running),
-                    package.long_running_reason,
-                    package.context_capsule_json,
-                    package.scope_json,
-                    package.created_at,
-                    package.updated_at,
-                ),
-            )
-            conn.commit()
-
-    def set_work_package_scope(self, package_id: str, scope_json: str) -> None:
-        """Attach the deterministic project scope to a work package."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "UPDATE work_packages SET scope_json = ?, updated_at = ? WHERE id = ?",
-                (scope_json, current_iso_timestamp(), package_id),
-            )
-            if cursor.rowcount == 0:
-                raise ValueError(f"unknown work package: {package_id}")
-            conn.commit()
-
     def get_work_packages(self, run_id: str) -> list[WorkPackage]:
         """Return packages ordered by their plan-step execution order."""
         if not self._plan_schema_available:
@@ -3715,24 +3411,6 @@ class Database:
                 (run_id,),
             ).fetchall()
             return [self._row_to_work_package(row) for row in rows]
-
-    def get_work_package(self, package_id: str) -> WorkPackage | None:
-        if not self._plan_schema_available:
-            return None
-        with self._get_connection() as conn:
-            row = conn.execute("SELECT * FROM work_packages WHERE id = ?", (package_id,)).fetchone()
-            return self._row_to_work_package(row) if row is not None else None
-
-    def update_work_package_candidate(
-        self, package_id: str, candidate_sha: str | None, capsule_json: str | None = None
-    ) -> None:
-        """Record the authoritative base/capsule used for the next package dispatch."""
-        with self._get_connection() as conn:
-            conn.execute(
-                "UPDATE work_packages SET base_candidate_sha = ?, context_capsule_json = COALESCE(?, context_capsule_json), updated_at = ? WHERE id = ?",
-                (candidate_sha, capsule_json, current_iso_timestamp(), package_id),
-            )
-            conn.commit()
 
     def upsert_supervision(self, record: SupervisionRecord) -> None:
         """Durably record supervisor evidence; no secrets or process handles are stored."""
@@ -4452,20 +4130,6 @@ class Database:
             cursor = conn.execute(
                 "SELECT * FROM worker_checkpoints WHERE run_id = ? AND checkpoint_sha = ? LIMIT 1",
                 (run_id, checkpoint_sha),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return None
-            return self._row_to_worker_checkpoint(row)
-
-    def get_worker_checkpoint_for_attempt(
-        self, run_id: str, source_attempt_id: str
-    ) -> WorkerCheckpoint | None:
-        """Fetch a worker checkpoint by its source attempt ID."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM worker_checkpoints WHERE run_id = ? AND source_attempt_id = ? LIMIT 1",
-                (run_id, source_attempt_id),
             )
             row = cursor.fetchone()
             if row is None:

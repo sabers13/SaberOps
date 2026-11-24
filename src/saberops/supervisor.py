@@ -336,14 +336,6 @@ class RunSupervisor:
         """Return transcript file path for a run_id (XDG state dir, keyed)."""
         return _get_transcript_path(self.db, run_id)
 
-    def get_transcript_bytes(self, run_id: str) -> bytes:
-        """Return full transcript bytes, or empty if none."""
-        p = self.get_transcript_path(run_id)
-        try:
-            return p.read_bytes()
-        except OSError:
-            return b""
-
     def shutdown(self) -> None:
         """Detach the UI/server without cancelling durable execution owners.
 
@@ -466,10 +458,6 @@ class RunSupervisor:
         if run is not None and run.status == RunStatus.PENDING:
             return None, Liveness.DEAD
         return None, Liveness.UNKNOWN
-
-    def is_execution_live(self, run_id: str) -> bool:
-        """True only when a detached or tracked owner is provably running."""
-        return self.execution_liveness(run_id) is Liveness.LIVE
 
     def _is_recovery_eligible(
         self,
@@ -1651,14 +1639,6 @@ class RunSupervisor:
         run_lock = self._get_run_lock(run_id)
         with run_lock:
             self._launch_with_lock_held(run_id, config)
-
-    def get_process(self, run_id: str) -> subprocess.Popen[Any] | None:
-        """Return tracked process for run_id if alive, else None."""
-        with self._lock:
-            proc = self._processes.get(run_id)
-            if proc is not None and proc.poll() is None:
-                return proc
-            return None
 
     def pause(self, run_id: str, *, reason: str = "paused") -> bool:
         """Stop one run's worker and park the run without discarding its work.

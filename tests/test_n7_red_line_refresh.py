@@ -30,7 +30,7 @@ from saberops.control_plane.policy import (
     ProviderPolicyState,
 )
 from saberops.db import Database
-from saberops.dispatch import control_plane_decision, refresh_quota_evidence
+from saberops.dispatch import control_plane_decision
 from saberops.models import WorkerCandidate
 
 _NOW = datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
@@ -49,17 +49,6 @@ class _Adapter:
     def is_available(self) -> bool:
         return True
 
-
-class _Probe:
-    """Deterministic zero-inference probe used by the tests."""
-
-    harness = "codex"
-
-    def __init__(self, remaining: float) -> None:
-        self._remaining = remaining
-
-    def read(self, now: datetime) -> list[tuple[str, float, datetime | None, str]]:
-        return [("5h", self._remaining, _NOW + timedelta(hours=3), "EXACT")]
 
 
 def _policy() -> ControlPlanePolicy:
@@ -163,76 +152,7 @@ def test_red_line_tipped_by_charges_exposes_ledger_and_offers_probe(
     assert payload["capacity"] == decision.capacity
 
 
-def test_fresh_probe_clears_charge_only_red_line(tmp_path: Path) -> None:
-    """A fresh 100 % reading resets the post-observation charges and admits."""
-    db = Database(tmp_path / "n7.db")
-    policy = _policy()
-    _seed_tipped_pool(db)
-    refused = _decide(db, policy)
-    assert refused.eligible is False
 
-    outcome = refresh_quota_evidence(
-        db,
-        provider="codex",
-        probes={"codex": _Probe(100.0)},
-        policy=policy,
-        now=_NOW,
-    )
-    assert outcome == "ran"
-
-    admitted = _decide(db, policy)
-    assert admitted.eligible is True
-    assert admitted.capacity is not None
-    assert admitted.capacity["prior_charges_pct"] == pytest.approx(0.0)
-    assert admitted.capacity["remaining_after_charges_pct"] == pytest.approx(
-        100.0
-    )
-    assert admitted.capacity["projected_cost_pct"] == pytest.approx(8.0)
-
-
-def test_fresh_low_probe_keeps_the_red_line_refusal(tmp_path: Path) -> None:
-    """Fresh evidence below the line still refuses: the fix is not a bypass."""
-    db = Database(tmp_path / "n7.db")
-    policy = _policy()
-    _seed_tipped_pool(db)
-
-    outcome = refresh_quota_evidence(
-        db,
-        provider="codex",
-        probes={"codex": _Probe(5.0)},
-        policy=policy,
-        now=_NOW,
-    )
-    assert outcome == "ran"
-
-    refused = _decide(db, policy)
-    assert refused.eligible is False
-    assert refused.exclusion_reason == "RED_LINE_5H"
-    # A genuinely low fresh reading is refused by the quota authority itself,
-    # before the charge ledger is consulted, so no probe is requested.
-    assert refused.capacity is None
-    assert refused.as_payload()["quota"]["normalized_remaining_pct"] == pytest.approx(
-        5.0
-    )
-
-
-def test_no_probe_keeps_conservative_refusal(tmp_path: Path) -> None:
-    """Without an available probe the original refusal stands unchanged."""
-    db = Database(tmp_path / "n7.db")
-    policy = _policy()
-    _seed_tipped_pool(db)
-    _decide(db, policy)
-
-    outcome = refresh_quota_evidence(
-        db, provider="codex", probes={}, policy=policy, now=_NOW
-    )
-    assert outcome == "disabled-under-test"
-
-    still_refused = _decide(db, policy)
-    assert still_refused.eligible is False
-    assert still_refused.exclusion_reason == "RED_LINE_5H"
-    assert still_refused.capacity is not None
-    assert still_refused.capacity["prior_charges_pct"] == pytest.approx(80.0)
 
 
 def test_tipped_red_line_probe_payload_is_durable_evidence(tmp_path: Path) -> None:

@@ -798,7 +798,10 @@ def _drill_quota_failover(rig: RigEnvironment) -> DrillResult:
     first, second = attempts[0], attempts[1]
     assert first.status is AttemptStatus.FAILED
     assert first.interruption_reason == "QUOTA_EXHAUSTED"
-    checkpoint = db.get_worker_checkpoint_for_attempt(run.id, first.id)
+    checkpoint = next(
+        c for c in db.get_worker_checkpoints_for_run(run.id)
+        if c.source_attempt_id == first.id
+    )
     assert checkpoint is not None, "no checkpoint recorded for the exhausted attempt"
     assert checkpoint.checkpoint_sha != rig.base_sha
     assert "fake_worker_output.txt" in checkpoint.changed_paths

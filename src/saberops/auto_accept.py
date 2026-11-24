@@ -350,13 +350,6 @@ def _final_candidate_attempt(db: Database, run_id: str) -> Attempt | None:
     return successful[-1] if successful else None
 
 
-def _latest_event_id(db: Database, run_id: str, event_type: str) -> int | None:
-    latest: int | None = None
-    for event in db.get_events_by_type(run_id, event_type):
-        if latest is None or event.id > latest:
-            latest = int(event.id)
-    return latest
-
 
 def _already_accepted_candidate(db: Database, run_id: str) -> str | None:
     """Return the SHA of the most recent accepted candidate, if any."""

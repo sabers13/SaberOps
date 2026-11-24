@@ -14,16 +14,7 @@ from typing import Any
 
 from saberops.cli import main as orch_main
 from saberops.db import Database
-from saberops.models import (
-    Handoff,
-    PlanStatus,
-    PlanStep,
-    PlanStepStatus,
-    Run,
-    RunPlan,
-    RunStatus,
-    Tier,
-)
+from saberops.models import Handoff, Run, RunStatus, Tier
 
 _CREATED = "2026-11-23T10:00:00+00:00"
 _HANDOFF_TEXT = "resume: continue from step_h9"
@@ -44,30 +35,29 @@ def _seed(db: Database) -> None:
             project_id="proj_h9",
         )
     )
-    db.create_run_plan(
-        RunPlan(
-            id="plan_h9",
-            run_id="run_h9",
-            status=PlanStatus.ACTIVE,
-            version=1,
-            created_at=_CREATED,
-            updated_at=_CREATED,
+    # Old run-plan evidence is read-only now; seed the retained rows directly.
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO run_plans (id, run_id, status, version, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("plan_h9", "run_h9", "ACTIVE", 1, _CREATED, _CREATED),
         )
-    )
-    db.create_plan_step(
-        PlanStep(
-            id="step_h9",
-            plan_id="plan_h9",
-            run_id="run_h9",
-            kind="implement",
-            title="wire the three views",
-            goal="keep status, watch and report",
-            status=PlanStepStatus.READY,
-            ordering=1,
-            created_at=_CREATED,
-            updated_at=_CREATED,
+        conn.execute(
+            "INSERT INTO plan_steps (id, plan_id, run_id, kind, title, goal, status, "
+            "ordering, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "step_h9",
+                "plan_h9",
+                "run_h9",
+                "implement",
+                "wire the three views",
+                "keep status, watch and report",
+                "READY",
+                1,
+                _CREATED,
+                _CREATED,
+            ),
         )
-    )
     db.create_handoff(
         Handoff(
             id="handoff_h9",

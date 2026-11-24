@@ -57,28 +57,7 @@ class PlanStatus(StrEnum):
     FAILED = "FAILED"
 
 
-class IndependenceState(StrEnum):
-    """Fail-closed admission state for independent semantic work."""
 
-    ESTABLISHED = "ESTABLISHED"
-    NOT_ESTABLISHED = "NOT_ESTABLISHED"
-
-
-class IntegrationDisposition(StrEnum):
-    """Representation-only state of deterministic branch integration."""
-
-    PENDING_CANDIDATES = "PENDING_CANDIDATES"
-    READY_FOR_INTEGRATION = "READY_FOR_INTEGRATION"
-    INTEGRATED = "INTEGRATED"
-    FAILED = "FAILED"
-
-
-class PostIntegrationValidationState(StrEnum):
-    """State of deterministic validation bound to one integration digest."""
-
-    REQUIRED_PENDING = "REQUIRED_PENDING"
-    PASSED = "PASSED"
-    FAILED = "FAILED"
 
 
 class HealthState(StrEnum):
@@ -302,12 +281,6 @@ class GateScratchMode(StrEnum):
 
 
 # Stable product order for UI dropdowns / ``orch project gate-scratch`` lists.
-GATE_SCRATCH_MODE_ORDER: tuple[GateScratchMode, ...] = (
-    GateScratchMode.DISK,
-    GateScratchMode.RAM_PREFERRED,
-    GateScratchMode.RAM_REQUIRED,
-)
-
 
 class BindingRole(StrEnum):
     """Semantic slot a binding is qualified to serve (ADR-0005 §3).
@@ -859,103 +832,9 @@ class WorkPackage:
     updated_at: str = ""
 
 
-@dataclass(frozen=True)
-class IndependentWorkBranch:
-    """One dependency-safe branch slot; representation only, never a launch.
-
-    Explicit CONCURRENT-WRITE CONTRACT: every component of a
-    concurrent-execution consumer's BWRAP-exact sandbox is carried directly
-    on the branch:
-
-    * ``writable_existing_paths``: canonical literal paths the branch may edit
-      (derived from ``owned_files ∪ interface_files ∪ test_files`` of the
-      module).  Distinct scope meanings are preserved: ``owned_files`` remain
-      the production owner; ``interface_files``/``test_files`` are added to
-      the contract only when structurally coherent (see planning.py).
-    * ``writable_new_subtrees``: literal ``<canonical-dir>/**`` subtree
-      prefixes the branch may extend.  Each is an EXACT, enforcement-
-      compatible literal prefix derived from a ``ProjectModule.root``;
-      glob-language intersection is not implemented.
-    * ``deny_paths``: sandbox deny patterns the contract commits to (the
-      existing trace default deny paths: ``.git/**``, ``.github/**``).
-    * ``write_contract_digest``: stable digest over all three components in
-      canonical order; rotates when any component rotates.
-
-    The branch's stable ``branch_id`` transitively binds
-    ``write_contract_digest``, so any contract change rotates ``branch_id``
-    and therefore ``integration_id``, ``integration_digest`` and
-    ``validation_id``.  No DB schema change.
-    """
-
-    branch_id: str
-    plan_step_id: str
-    work_package_id: str
-    attempt_slot_id: str
-    attempt_id: str | None
-    integration_base_sha: str
-    isolation_requirement_id: str
-    context_capsule_digest: str
-    owner_module_id: str
-    writable_existing_paths: tuple[str, ...]
-    writable_new_subtrees: tuple[str, ...]
-    deny_paths: tuple[str, ...]
-    write_contract_digest: str
-    ordering_key: str
-    candidate_slot_id: str
-    candidate_sha: str | None = None
 
 
-@dataclass(frozen=True)
-class IndependentWorkDecision:
-    """Auditable admission decision for a set of independent READY packages."""
 
-    run_id: str
-    state: IndependenceState
-    branches: tuple[IndependentWorkBranch, ...]
-    integration_base_sha: str | None
-    sequential_fallback_required: bool
-    reasons: tuple[str, ...]
-    evidence: tuple[str, ...]
-    decision_digest: str
-
-
-@dataclass(frozen=True)
-class IntegrationParticipant:
-    """Exact branch/candidate slot participating in deterministic integration."""
-
-    branch_id: str
-    plan_step_id: str
-    work_package_id: str
-    attempt_slot_id: str
-    candidate_slot_id: str
-    candidate_sha: str | None
-
-
-@dataclass(frozen=True)
-class DeterministicIntegration:
-    """Representation of deterministic integration; it performs no merge."""
-
-    integration_id: str
-    integration_digest: str
-    integration_base_sha: str
-    participants: tuple[IntegrationParticipant, ...]
-    deterministic_order: tuple[str, ...]
-    disposition: IntegrationDisposition
-    integration_result_sha: str | None
-    failure_reason: str | None
-    post_integration_validation_required: bool = True
-
-
-@dataclass(frozen=True)
-class PostIntegrationValidation:
-    """Validation state cryptographically bound to one integration rendering."""
-
-    validation_id: str
-    integration_id: str
-    integration_digest: str
-    integration_result_sha: str | None
-    state: PostIntegrationValidationState
-    reason: str | None = None
 
 
 @dataclass(frozen=True)

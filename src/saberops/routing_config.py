@@ -138,9 +138,6 @@ def requires_training_permission(candidate_id: str) -> bool:
     return norm in TRAINING_REQUIRED_CANDIDATES or "muse" in norm
 
 
-def _is_muse_id(cid: str) -> bool:
-    return requires_training_permission(cid)
-
 
 def _route_id(entry: Any) -> str | None:
     if isinstance(entry, str):
@@ -464,9 +461,6 @@ class ValidatedRouting:
     strong_start_pacing: list[int]
     #: Retired role keys that were migrated away, in document order.
     migrated_roles: tuple[str, ...] = ()
-
-    def role_groups(self) -> dict[str, list[list[str]]]:
-        return {"BUILD": self.build}
 
     def pacing(self) -> dict[str, list[int]]:
         return {"BUILD": self.build_pacing, STRONG_START_KEY: self.strong_start_pacing}

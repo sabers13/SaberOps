@@ -101,7 +101,7 @@ from saberops.questions import (
     is_due,
     question_view,
 )
-from saberops.runtime import ProjectRuntime, ProjectRuntimeManager
+from saberops.runtime import ProjectRuntimeManager
 from saberops.service import OrchestratorService
 from saberops.storage_cleanup import (
     current_disk_floor_bytes,
@@ -171,28 +171,10 @@ _BIN_ATTR: dict[str, str] = {
     "antigravity": "agy_bin",
 }
 
-_PROVIDERS = ("opencode", "codex", "antigravity")
-
-_TIERS = ("T1", "T2", "T3")
-
-_DEFAULT_GATE_COMMAND = "make gate"
-
-TERMINAL_EVENT_TYPES: frozenset[str] = frozenset(
-    {"run_completed", "run_failed", "run_exception", "run_preempted"}
-)
-
 #: Owner-action event types that must reach the run-page EventSource even
 #: after the run itself is terminal (manual Review / Accept happens on an
 #: already COMPLETED run).  Kept as a literal tuple so the client bundle
 #: and the stream liveness check share one visible contract.
-OWNER_ACTION_SSE_EVENT_TYPES: tuple[str, ...] = (
-    "owner_action_queued",
-    "owner_action_started",
-    "owner_action_completed",
-    "owner_action_failed",
-    "owner_action_uncertain",
-)
-
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
@@ -1085,42 +1067,10 @@ def _posture_rows() -> list[dict[str, Any]]:
 
 
 
-_ACCOUNT_LABELS: dict[str, str] = {
-    "anthropic": "Claude",
-    "antigravity": "Antigravity",
-    "codex": "Codex",
-    "google": "Google",
-    "openai": "OpenAI",
-    "opencode": "OpenCode",
-}
-
 
 
 #: Owner-facing names for the upstream providers an aggregator account (OpenCode,
 #: a custom API connection) routes to; the prefix is the model id's first segment.
-_UPSTREAM_LABELS: dict[str, str] = {
-    "opencode": "OpenCode Zen",
-    "opencode-go": "OpenCode Go",
-    "minimax-coding-plan": "MiniMax Coding Plan",
-    "generalcompute": "General Compute",
-    "tokenrouter": "TokenRouter",
-    "zhipuai": "Zhipu AI",
-    "z-ai": "Z.ai",
-    "x-ai": "xAI",
-    "openai": "OpenAI",
-    "anthropic": "Anthropic",
-    "google": "Google",
-    "deepseek": "DeepSeek",
-    "mistralai": "Mistral AI",
-    "moonshotai": "Moonshot AI",
-    "meta-llama": "Meta Llama",
-    "minimax": "MiniMax",
-    "openrouter": "OpenRouter",
-    "nvidia": "NVIDIA",
-    "qwen": "Qwen",
-    "ibm-granite": "IBM Granite",
-}
-
 
 
 
@@ -1417,10 +1367,6 @@ def create_app(
         pinned_db_path=resolved_db_path,
         state_root=state_root,
     )
-
-    def runtime_for_run(run_id: str) -> ProjectRuntime | None:
-        """Runtime owning an existing run, resolved from the run itself."""
-        return runtimes.for_run(run_id)
 
     pinned = runtimes.legacy()
     db = pinned.db

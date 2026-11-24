@@ -574,24 +574,17 @@ def _concurrency_doc(max_global: object, *, base: dict[str, Any] | None = None) 
 
 def test_concurrency_max_global_parsed_and_effective() -> None:
     """Covers: owner concurrency.max_global is parsed and effective."""
-    from saberops.control_plane.policy import (
-        DEFAULT_MAX_GLOBAL_CONCURRENT,
-        effective_global_slot_limit,
-    )
+    from saberops.control_plane.policy import DEFAULT_MAX_GLOBAL_CONCURRENT
 
     assert DEFAULT_MAX_GLOBAL_CONCURRENT == 15
     policy = _build(_concurrency_doc(3), "test")
     assert policy.max_global_concurrent == 3
-    assert effective_global_slot_limit(policy) == 3
 
 
 def test_concurrency_absent_defaults_to_15() -> None:
     """Covers: absent owner key resolves to the interim default 15."""
-    from saberops.control_plane.policy import effective_global_slot_limit
-
     policy = _build({"version": 2, "providers": {}, "quota_pools": {}}, "test")
     assert policy.max_global_concurrent is None
-    assert effective_global_slot_limit(policy) == 15
 
 
 @pytest.mark.parametrize("value", [1, 3, 15, 16, 40])
@@ -640,14 +633,11 @@ def test_concurrency_explicit_null_is_treated_as_absent() -> None:
     """Covers: an explicit JSON null concurrency block means
     "unset" and resolves to the interim default (not an error, not unbounded).
     """
-    from saberops.control_plane.policy import effective_global_slot_limit
-
     policy = _build(
         {"version": 2, "providers": {}, "quota_pools": {}, "concurrency": None},
         "test",
     )
     assert policy.max_global_concurrent is None
-    assert effective_global_slot_limit(policy) == 15
 
 
 def test_concurrency_changes_content_hash_when_present() -> None:
@@ -686,49 +676,4 @@ def test_concurrency_survives_preserving_write(isolated_config: Path) -> None:
     assert raw["concurrency"] == {"max_global": 9}
 
 
-def test_effective_global_slot_limit_override_lowers_only() -> None:
-    """Covers: the CLI override can only lower the effective cap."""
-    from saberops.control_plane.policy import effective_global_slot_limit
 
-    owner15 = _build(_concurrency_doc(15), "test")
-    owner40 = _build(_concurrency_doc(40), "test")
-    default = _build({"version": 2, "providers": {}, "quota_pools": {}}, "test")
-
-    assert effective_global_slot_limit(owner15, override=1) == 1
-    assert effective_global_slot_limit(owner15, override=20) == 15
-    assert effective_global_slot_limit(owner40, override=20) == 20
-    assert effective_global_slot_limit(owner40) == 40
-    assert effective_global_slot_limit(default, override=3) == 3
-
-    with pytest.raises(ValueError, match="max-concurrent override"):
-        effective_global_slot_limit(owner15, override=0)
-    with pytest.raises(ValueError, match="max-concurrent override"):
-        effective_global_slot_limit(owner15, override=-1)
-    with pytest.raises(ValueError, match="max-concurrent override"):
-        effective_global_slot_limit(owner15, override=True)
-
-
-def test_effective_global_slot_limit_injected_lowers_only() -> None:
-    """Covers: an injected programmatic limit is lowering-only
-    and cannot raise admission above the owner cap.
-    """
-    from saberops.control_plane.policy import effective_global_slot_limit
-
-    owner3 = _build(_concurrency_doc(3), "test")
-    owner15 = _build(_concurrency_doc(15), "test")
-    default = _build({"version": 2, "providers": {}, "quota_pools": {}}, "test")
-
-    # Owner cap of 3 always wins over a larger injected limit.
-    assert effective_global_slot_limit(owner3, injected=99) == 3
-    assert effective_global_slot_limit(owner3, injected=1) == 1
-    # The 15 default is the authority when the owner set no key.
-    assert effective_global_slot_limit(default, injected=7) == 7
-    assert effective_global_slot_limit(default, injected=99) == 15
-    # Minimum of owner, CLI override and injection.
-    assert effective_global_slot_limit(owner15, override=5, injected=2) == 2
-    assert effective_global_slot_limit(owner15, override=2, injected=99) == 2
-    assert effective_global_slot_limit(owner15, override=99, injected=99) == 15
-
-    for bad in (0, -1, True, False, "3", 1.5):
-        with pytest.raises(ValueError, match="injected global slot limit"):
-            effective_global_slot_limit(owner15, injected=bad)  # type: ignore[arg-type]

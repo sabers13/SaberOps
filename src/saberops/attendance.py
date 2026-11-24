@@ -380,7 +380,3 @@ def attend(
         session.stop()
 
 
-def heartbeat_age(record: AttendanceRecord, *, now: datetime | None = None) -> float:
-    """Seconds since the record's last heartbeat (0 when in the future)."""
-    moment = now or _now()
-    return max(0.0, moment.timestamp() - record.heartbeat_at)

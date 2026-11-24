@@ -62,10 +62,6 @@ class AdapterRegistry:
         """Return list of all registered provider names."""
         return list(self._adapters.keys())
 
-    def get_available_providers(self) -> list[str]:
-        """Return list of all currently available provider names."""
-        return [name for name, adapter in self._adapters.items() if adapter.is_available()]
-
     @classmethod
     def default(cls) -> AdapterRegistry:
         """Create a default registry populated with standard provider adapters.

@@ -22,9 +22,6 @@ REGISTERED_HARNESSES: tuple[str, ...] = ("codex", "claude", "opencode-go")
 #: Antigravity is intentionally not registered (owner-initiated only).
 
 
-class ProbeWindow(tuple):  # type: ignore[type-arg]
-    """(window_id, remaining_pct, reset_at, reset_confidence)."""
-
 
 class Probe(Protocol):
     harness: str

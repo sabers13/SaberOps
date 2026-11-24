@@ -97,7 +97,6 @@ BINDING_STORE_SCHEMA_VERSION = 1
 #: Test / diagnostics override for the owner binding document path.
 ORCH_BINDING_STORE_ENV = "ORCH_BINDING_STORE"
 
-_BINDING_STORE_DIR = "saberops"
 _BINDING_STORE_FILENAME = "bindings.json"
 
 

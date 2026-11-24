@@ -33,7 +33,7 @@ import os
 import shutil
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -374,13 +374,6 @@ def _learned_estimate(db: Database, vendor: str) -> float | None:
 # Claim
 # --------------------------------------------------------------------------- #
 
-
-@dataclass(frozen=True)
-class _ClaimFields:
-    run_id: str
-    attempt_id: str
-    branch: str
-    worktree: Path
 
 
 def _new_run(db: Database, job: Job, *, vendor: str, model: str) -> Run:

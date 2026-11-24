@@ -362,16 +362,6 @@ class OrchestratorExecutionConfig:
                     f"OrchestratorExecutionConfig: {attr} must be an EffortPolicy"
                 )
 
-    def bounds_for(self, role: str) -> EffortPolicy:
-        """Return the owner-bounded effort policy for ``role``."""
-        from saberops.models import DispatchRole
-
-        if role.strip().upper() in ("PLAN", "ORCHESTRATOR"):
-            return self.orch_effort
-        if role == DispatchRole.CHECK.value:
-            return self.reviewer_effort_bounds
-        return self.worker_effort_bounds
-
     def to_dict(self) -> dict[str, Any]:
         """Canonical rendering for owner-side evidence."""
         return {

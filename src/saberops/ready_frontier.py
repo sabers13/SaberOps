@@ -208,24 +208,6 @@ _REASON_INDEX: dict[FrontierReason, int] = {
     reason: index for index, reason in enumerate(FrontierReason)
 }
 
-_STRUCTURAL_REASONS: frozenset[FrontierReason] = frozenset(
-    {
-        FrontierReason.INVALID_LIMIT,
-        FrontierReason.MISSING_IDENTITY,
-        FrontierReason.UNKNOWN_TASK_KIND,
-        FrontierReason.UNKNOWN_TASK_STATUS,
-        FrontierReason.UNKNOWN_SNAPSHOT_SOURCE,
-        FrontierReason.INCOMPLETE_SNAPSHOT,
-        FrontierReason.UNSAFE_WRITE_SCOPE,
-        FrontierReason.OWNER_MISMATCH,
-        FrontierReason.CONFLICTING_TASK_IDENTITY,
-        FrontierReason.MISSING_DEPENDENCY,
-        FrontierReason.MISSING_INTEGRATION_PREREQUISITE,
-        FrontierReason.CYCLIC_DEPENDENCY,
-        FrontierReason.CYCLIC_INTEGRATION_PREREQUISITE,
-    }
-)
-
 #: Start statuses for a task that has not yet begun and is not waiting.
 _STARTABLE_STATUSES: frozenset[str] = frozenset(
     {TaskStatus.PENDING.value, TaskStatus.READY.value}

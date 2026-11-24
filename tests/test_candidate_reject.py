@@ -505,28 +505,6 @@ def test_h1_rejection_blocker_check_shape(tmp_path: Path) -> None:
     assert matches[0].status == "fail"
 
 
-def test_i_diff_preserved_after_rejection(tmp_path: Path) -> None:
-    from saberops.candidate_diff import project_candidate_diff
-
-    repo, base, candidate = _git_repo(tmp_path / "repo-i")
-    db = _db(tmp_path / "db-i")
-    db.db_path.parent.mkdir(parents=True, exist_ok=True)
-    _seed_eligible(db, "run-i", repo, base, candidate)
-
-    before = project_candidate_diff(db, "run-i")
-    assert before.available is True
-    assert before.candidate_sha == candidate
-    assert before.base_sha == base
-
-    OrchestratorService(db=db).reject_candidate("run-i")
-
-    after = project_candidate_diff(db, "run-i")
-    assert after == before
-    assert after.available is True
-    assert after.diff_text
-    assert after.changed_paths == ("feature.txt",)
-
-
 
 def test_g1_concurrent_reject_is_durably_idempotent(tmp_path: Path) -> None:
     """Concurrent Reject from separate DB instances writes exactly one event.
@@ -611,15 +589,12 @@ def test_g1_concurrent_reject_is_durably_idempotent(tmp_path: Path) -> None:
 
 
 def test_k_reads_alone_add_no_rejection_event(tmp_path: Path) -> None:
-    from saberops.candidate_diff import project_candidate_diff
-
     repo, base, candidate = _git_repo(tmp_path / "repo-k")
     db_path = tmp_path / "web-k.db"
     db = Database(db_path)
     _seed_eligible(db, "run-k", repo, base, candidate)
 
     project_candidate_state(db, "run-k")
-    project_candidate_diff(db, "run-k")
     AcceptEngine(db=db).check_accept_eligibility("run-k")
     assert db.get_events_by_type("run-k", REJECTION_EVENT_TYPE) == []
 

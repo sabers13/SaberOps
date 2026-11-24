@@ -100,13 +100,6 @@ class QuotaDecision:
     reset_at: str | None = None
 
 
-def _candidate_ids(candidate: WorkerCandidate) -> tuple[str, str, str]:
-    return (
-        f"{candidate.provider}/{candidate.model}".lower(),
-        candidate.model.lower(),
-        candidate.provider.lower(),
-    )
-
 
 def _member_matches(member: str, candidate: WorkerCandidate) -> bool:
     text = member.strip().lower()

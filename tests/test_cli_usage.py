@@ -8,8 +8,6 @@ from pathlib import Path
 import pytest
 
 from saberops.cli_usage import parse_limits, read_limits
-from saberops.db import Database
-from saberops.models import DispatchStage, ModelCallUsage, Run, RunStatus, Tier
 
 
 def test_limit_shapes_preserve_unknown_and_unlimited() -> None:
@@ -56,50 +54,6 @@ for _ in range(4):
     methods = [json.loads(line)["method"] for line in trace.read_text().splitlines()]
     assert methods == ["initialize", "initialized", "account/rateLimits/read"]
 
-
-def test_recorded_provider_totals_keep_missing_tokens_unknown(tmp_path: Path) -> None:
-    db = Database(tmp_path / "app.db")
-    db.create_run(
-        Run(
-            id="run1",
-            task="usage test",
-            target_repo=str(tmp_path),
-            base_commit="abc",
-            tier=Tier.T1,
-            training_allowed=True,
-            gate_command="true",
-            status=RunStatus.PENDING,
-            created_at="2026-10-05T00:00:00Z",
-        )
-    )
-    db.create_model_call_usage(
-        ModelCallUsage(
-            id="call1",
-            run_id="run1",
-            association_id="association1",
-            attempt_id=None,
-            review_id=None,
-            stage=DispatchStage.IMPLEMENTATION,
-            tier=Tier.T1,
-            provider="antigravity",
-            model="gemini",
-            prompt_bytes=0,
-            transport="DIRECT_CLI",
-            input_tokens=None,
-            output_tokens=None,
-            cached_tokens=None,
-            total_tokens=None,
-            cache_read_tokens=None,
-            cache_write_tokens=None,
-            reasoning_tokens=None,
-            usage_source="unknown",
-            raw_usage_json=None,
-            created_at="2026-10-05T00:00:00Z",
-        )
-    )
-    totals = db.aggregate_provider_usage()
-    assert totals[0]["calls"] == 1 and totals[0]["unknown_calls"] == 1
-    assert totals[0]["input_tokens"] is None
 
 
 def test_native_timeout_terminates_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -17,18 +17,7 @@ from typing import Any
 from saberops.native_usage_panel import read_panel
 from saberops.opencode_go_usage import read_go_limits
 
-CLIS = (
-    ("codex", "codex", "Codex"),
-    ("anthropic", "claude", "Claude Code"),
-    ("opencode", "opencode", "OpenCode"),
-    ("antigravity", "agy", "Antigravity"),
-    ("gemini", "gemini", "Gemini CLI"),
-)
-MAX_LOG_BYTES = 32 * 1024 * 1024
-MAX_LOG_FILES = 300
 RPC_TIMEOUT = 10.0
-LIMIT_PROVIDERS = ("codex", "anthropic", "antigravity", "opencode")
-
 
 def numeric(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):

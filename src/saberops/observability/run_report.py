@@ -1054,16 +1054,6 @@ def _project_scope_snapshot(db: Database, run_id: str) -> dict[str, Any] | None:
     }
 
 
-def _routing_digest(raw: str | None) -> str | None:
-    if not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        value = raw
-    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
 
 def _attempt_row(attempt: Attempt) -> dict[str, Any]:
     """Project one attempt row into the candidate-lineage evidence list."""

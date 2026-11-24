@@ -684,15 +684,6 @@ class GitManager:
         return res.stdout.strip() if res.passed else None
 
     @staticmethod
-    def fast_forward_merge(repo_path: Path | str, target_ref: str) -> str:
-        """Fast-forward merge target_ref into the current branch of repo_path."""
-        repo = Path(repo_path).resolve()
-        res = run_process(["git", "merge", "--ff-only", target_ref], cwd=repo)
-        if not res.passed:
-            raise RuntimeError(f"Fast-forward merge of '{target_ref}' failed: {res.stderr}")
-        return GitManager.get_head_commit(repo)
-
-    @staticmethod
     def compare_and_swap_ref(
         repo_path: Path | str,
         ref: str,

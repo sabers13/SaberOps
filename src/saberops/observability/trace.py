@@ -20,7 +20,6 @@ event is available, and it never lets secret values enter the row.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import uuid
@@ -79,10 +78,6 @@ def _bounded(value: str | None, *, limit: int) -> str | None:
 def _canonical_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
-
-def _summary_digest(payload: dict[str, Any]) -> str:
-    canonical = _canonical_json(payload)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -276,24 +271,6 @@ class AttemptTraceRecorder:
         self._bump_summary()
         return updated
 
-    def record_failure(
-        self,
-        failure_kind: FailureKind,
-        failure_reason: str | None = None,
-    ) -> None:
-        """Set the attempt-level failure classification.
-
-        Does not close the trace; use :meth:`finalise` for that.  The
-        reason is bounded and secret-stripped like every other redacted
-        field.
-        """
-        self.failure_kind = failure_kind
-        self.failure_reason = _bounded(
-            _redact_secret_payload(failure_reason), limit=_REDACT_RESULT_LIMIT
-        )
-        self.updated_at = current_iso_timestamp()
-        self._persist_trace()
-
     def finalise(self) -> AttemptTrace:
         """Close the trace row and return the persisted evidence.
 
@@ -327,27 +304,6 @@ class AttemptTraceRecorder:
         )
 
     # -- native structured event ingestion --------------------------------
-
-    def ingest_native_event(self, event: dict[str, Any]) -> None:
-        """Ingest one native structured event from the backend.
-
-        The recorder never parses terminal text into events.  It accepts
-        whatever the backend actually emitted, normalises the bounded
-        counters into the recorder summary, and lets the caller decide
-        whether the event represents a tool operation.  The backend is
-        responsible for translating its native event vocabulary into the
-        canonical :class:`ToolEffect` shape via
-        :meth:`record_tool_effect`.
-        """
-        if not isinstance(event, dict):
-            return
-        events_total = int(self._summary.get("native_events_total", 0)) + 1
-        self._summary["native_events_total"] = events_total
-        self._summary["last_native_event_digest"] = _summary_digest(
-            {"event": event}
-        )
-        self._summary["last_native_event_type"] = str(event.get("type") or "unknown")
-        self._bump_summary()
 
     # -- private helpers --------------------------------------------------
 

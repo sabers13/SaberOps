@@ -121,12 +121,6 @@ class ToolExposurePlan:
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    def mechanism_for(self, capability: str) -> ExposureMechanism | None:
-        for entry in self.entries:
-            if entry.capability == capability:
-                return entry.mechanism
-        return None
-
     def as_dict(self) -> dict[str, Any]:
         return {
             "schema_version": 1,

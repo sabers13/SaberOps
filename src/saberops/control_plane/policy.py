@@ -69,38 +69,6 @@ class ControlPlanePolicy:
         )
 
 
-def effective_global_slot_limit(
-    policy: ControlPlanePolicy,
-    *,
-    override: int | None = None,
-    injected: int | None = None,
-) -> int:
-    """Resolve the effective aggregate top-level job ceiling.
-
-    The owner-configured ``concurrency.max_global`` wins when present;
-    otherwise the deterministic interim default
-    :data:`DEFAULT_MAX_GLOBAL_CONCURRENT` applies.  Both the ``override``
-    (the ``orch scheduler run --max-concurrent N`` flag) and an ``injected``
-    programmatic limit are **lowering-only** inputs: the result is the
-    minimum of the owner ceiling and every supplied input, so neither an
-    untrusted process flag nor a programmatic caller can admit more
-    top-level jobs than the owner allows.  Raising the ceiling requires an
-    owner config/UI change.  An invalid value (bool, ``0``, negative or
-    non-int) fails closed and is never treated as "unlimited".
-    """
-    owner_cap = policy.max_global_concurrent
-    effective = DEFAULT_MAX_GLOBAL_CONCURRENT if owner_cap is None else owner_cap
-    for value, label in (
-        (override, "max-concurrent override"),
-        (injected, "injected global slot limit"),
-    ):
-        if value is None:
-            continue
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise ValueError(f"{label} must be an int >= 1")
-        effective = min(effective, value)
-    return effective
-
 
 def _quota_pool_entry(pool: QuotaPoolPolicy) -> dict[str, object]:
     """Shared pool serialisation for digests (v1-compatible, no drift).

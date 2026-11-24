@@ -305,10 +305,6 @@ def project_state_dir(identity: ProjectIdentity, root: Path | str | None = None)
     return base / identity.namespace
 
 
-def project_db_path(identity: ProjectIdentity, root: Path | str | None = None) -> Path:
-    """Return the project-local run database path."""
-    return project_state_dir(identity, root) / "orchestrator.db"
-
 
 def bind_project_state_dir(identity: ProjectIdentity, root: Path | str | None = None) -> Path:
     """Return the state directory bound to ``identity``, creating it if absent.

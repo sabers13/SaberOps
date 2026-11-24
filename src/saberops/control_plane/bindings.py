@@ -306,10 +306,6 @@ class ExecutionBinding:
         """True iff this binding declares ``effort`` as a controllable tier."""
         return effort in self.reasoning_effort_capabilities
 
-    def supports_role(self, role: DispatchRole) -> bool:
-        """True iff this binding declares it may be ``role``."""
-        return role in self.supported_roles
-
     def supports_risk(self, risk: RiskLevel) -> bool:
         """True iff this binding declares ``risk`` is permitted."""
         return risk in self.risk_levels
@@ -381,12 +377,6 @@ class ExecutionBinding:
         canonical = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-
-def _indexed(items: Iterable[Any], *, key: str) -> set[str]:
-    out: set[str] = set()
-    for item in items:
-        out.add(getattr(item, key))
-    return out
 
 
 @dataclass(frozen=True)
@@ -844,15 +834,6 @@ class ResolvedExecutionBinding:
 #: profile hook may only return the executable selector keys above; anything
 #: else -- including an attempt to overwrite these -- fails closed instead
 #: of executing.
-_RESERVED_PROFILE_OVERLAY_KEYS: frozenset[str] = frozenset(
-    {
-        ORCH_EXECUTION_BINDING_ENV,
-        ORCH_EXECUTION_PROFILE_ENV,
-        ORCH_EXECUTION_POOL_ENV,
-        ORCH_EXECUTION_BACKEND_ENV,
-    }
-)
-
 #: The only overlay keys a generic ``execution_profile_overlay`` hook
 #: may return.  The mapping is deliberately closed: executable
 #: profile selection travels exclusively through these two

@@ -1569,52 +1569,6 @@ class Orchestrator:
             supervisor=supervisor,
         )
 
-    def _autonomous_pre_accept_valid(self, run_id: str, config: RunConfig) -> bool:
-        """Verify every required pre-accept condition from durable state.
-
-        Candidate-ready is valid for :class:`AcceptEngine` acceptance only
-        when required independent review substantively approved
-        (PASS/PASS_WITH_BACKLOG) AND required candidate publication
-        succeeded for the final candidate SHA.  Anything else fails closed.
-        """
-        run = self.db.get_run(run_id)
-        if run is None or run.status != RunStatus.COMPLETED:
-            return False
-        try:
-            loop_state = self.db.get_review_loop_state(run_id)
-        except Exception:
-            loop_state = None
-        terminal_raw = loop_state.get("terminal_verdict") if isinstance(loop_state, dict) else None
-        terminal_verdict: ReviewVerdict | None = None
-        if isinstance(terminal_raw, str) and terminal_raw:
-            try:
-                terminal_verdict = ReviewVerdict(terminal_raw)
-            except ValueError:
-                terminal_verdict = None
-        if terminal_verdict is None:
-            latest_review = self.db.get_latest_review(run_id)
-            terminal_verdict = latest_review.verdict if latest_review else None
-        if terminal_verdict not in (
-            ReviewVerdict.PASS,
-            ReviewVerdict.PASS_WITH_BACKLOG,
-        ):
-            return False
-        if not config.publish_candidate:
-            return True
-        attempts = self.db.get_attempts_for_run(run_id)
-        successful = [a for a in attempts if a.status == AttemptStatus.SUCCESS and a.commit_sha]
-        if not successful:
-            return False
-        final_sha = successful[-1].commit_sha
-        for event in self.db.get_events_by_type(run_id, "candidate_published"):
-            payload = event.payload or {}
-            if (
-                payload.get("candidate_sha") == final_sha
-                and payload.get("verified_remote_sha") == final_sha
-            ):
-                return True
-        return False
-
     def _run_core(
         self,
         *,

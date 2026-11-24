@@ -29,14 +29,12 @@ from pathlib import Path
 from saberops.db import Database, get_default_db_path
 from saberops.project import (
     ProjectIdentity,
-    ProjectIdentityError,
     ProjectStateUnavailableError,
     bind_project_state_dir,
     compute_project_identity,
     find_project_state_dir,
     project_id_from_run_id,
     projects_state_root,
-    read_project_marker,
 )
 from saberops.service import OrchestratorService
 from saberops.supervisor import RunSupervisor
@@ -133,69 +131,6 @@ class ProjectRuntimeManager:
     def legacy(self) -> ProjectRuntime:
         """Return the runtime for the preserved global store."""
         return self._cached("__legacy__", None, self.owner_db.db_path)
-
-    def for_identity(self, identity: ProjectIdentity) -> ProjectRuntime:
-        """Return (creating if needed) the runtime for an identified project.
-
-        The state directory's identity binding is validated on every
-        resolution, so a repository that has been replaced at the same
-        canonical path fails closed instead of inheriting the previous
-        repository's database.
-        """
-        if self.pinned_db_path is not None:
-            # Explicit single-store contract: one database, one supervisor.
-            return self.legacy()
-        state_dir = bind_project_state_dir(identity, self.state_root)
-        return self._cached(identity.project_id, identity, state_dir / "orchestrator.db")
-
-    def for_repo(self, repo_path: Path | str) -> ProjectRuntime:
-        """Return the runtime for the repository at ``repo_path``."""
-        return self.for_identity(compute_project_identity(repo_path))
-
-    def for_run(self, run_id: str) -> ProjectRuntime | None:
-        """Resolve a run back to its own project runtime.
-
-        Resolution uses the run ID's embedded project segment and the state
-        directory's verified identity binding.  It never consults the
-        active-project selection, so changing the selected project cannot
-        retarget an existing run.
-
-        A run ID that carries a project segment resolves to that project or to
-        nothing: it is never downgraded to a lookup in the preserved global
-        store, even if a row with the same ID happens to exist there.  Only
-        genuinely legacy IDs (no project segment) use the global store.
-        """
-        if self.pinned_db_path is not None:
-            runtime = self.legacy()
-            return runtime if runtime.db.get_run(run_id) is not None else None
-        project_id = project_id_from_run_id(run_id)
-        if project_id is not None:
-            state_dir = find_project_state_dir(project_id, self.state_root)
-            if state_dir is None:
-                return None
-            identity = read_project_marker(state_dir)
-            if identity is None:
-                return None
-            runtime = self._cached(identity.project_id, identity, state_dir / "orchestrator.db")
-            return runtime if runtime.db.get_run(run_id) is not None else None
-        legacy = self.legacy()
-        return legacy if legacy.db.get_run(run_id) is not None else None
-
-    def for_active(self, repo_path: Path | str | None) -> ProjectRuntime:
-        """Return the runtime for a caller's currently selected project.
-
-        This is a navigation convenience only: it decides what a view *shows*,
-        never what an existing run acts on.  When the selection cannot be
-        resolved to a usable project the caller falls back to the preserved
-        global store rather than erroring; every *action* goes through
-        :meth:`for_repo` or :meth:`for_run`, which fail closed.
-        """
-        if repo_path is None:
-            return self.legacy()
-        try:
-            return self.for_repo(repo_path)
-        except ProjectIdentityError:
-            return self.legacy()
 
     def shutdown(self) -> None:
         """Detach every cached supervisor without cancelling durable workers."""

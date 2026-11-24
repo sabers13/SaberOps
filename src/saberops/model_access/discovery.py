@@ -429,10 +429,6 @@ class ModelCatalog:
                 return model
         return None
 
-    def execution_supported(self) -> tuple[DiscoveredModel, ...]:
-        """Entries with positively observed execution support (evidence only)."""
-        return tuple(model for model in self.models if model.is_execution_supported)
-
     def to_dict(self) -> dict[str, Any]:
         """Canonical rendering (evidence only, no secrets)."""
         return {

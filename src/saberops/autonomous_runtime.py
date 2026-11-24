@@ -341,16 +341,6 @@ class AutonomousSupervisor:
             if getattr(binding, "binding_role", None) is BindingRole.BUILD
         )
 
-    def _policy_bindings(self) -> tuple[Any, ...]:
-        """Return the WORKER-role eligible bindings (historical alias).
-
-        This helper remains under its historical name for callers that
-        still iterate eligible bindings (e.g. failover exploration).
-        The result is the BUILD-role subset of the registry in
-        declaration order.
-        """
-        return self._worker_eligible_bindings()
-
     def _binding_for_candidate(
         self,
         *,
@@ -1117,8 +1107,6 @@ _CANONICAL_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 #: Evidence marker binding an accepted SHA to its run.  The base resolver
 #: parses exactly this marker form; statement prose is never parsed.
-ACCEPT_EVIDENCE_PREFIX = "run:"
-
 
 class AcceptanceAuthorityError(RuntimeError):
     """Raised when Project projection lacks durable :class:`AcceptEngine` evidence.
@@ -1130,18 +1118,6 @@ class AcceptanceAuthorityError(RuntimeError):
     """
 
 
-def _accept_marker(run_id: str, final_sha: str) -> str:
-    return f"{ACCEPT_EVIDENCE_PREFIX}{run_id}:sha:{final_sha}"
-
-
-def _parse_accept_marker(reference: str) -> tuple[str, str] | None:
-    if not reference.startswith(ACCEPT_EVIDENCE_PREFIX):
-        return None
-    rest = reference[len(ACCEPT_EVIDENCE_PREFIX):]
-    run_id, sep, tail = rest.partition(":sha:")
-    if not sep or not run_id or not tail:
-        return None
-    return run_id, tail
 
 
 def _is_canonical_sha(value: object) -> bool:
