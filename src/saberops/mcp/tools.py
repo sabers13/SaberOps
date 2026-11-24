@@ -6,7 +6,7 @@ The following tools are exposed::
     resume_job redirect_job get_job catch_up plan_status tail_job wait_job list_jobs
     cancel_job note_job discard_note capacity read_evidence list_questions
     answer_question propose_config_change list_proposals get_mode propose_mode_change
-    get_pause doctor doctor_fix
+    tighten_mode get_pause doctor doctor_fix
 
 With ``ORCH_NATIVE_WORKERS`` enabled, four more tools exist for the hybrid
 native-worker path (ADR-0030): ``native_claim``, ``native_heartbeat``,
@@ -122,6 +122,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "answer_question",
         "propose_config_change",
         "propose_mode_change",
+        "tighten_mode",
         "doctor_fix",
     }
 )
@@ -186,6 +187,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "list_proposals",
     "get_mode",
     "propose_mode_change",
+    "tighten_mode",
     "get_pause",
     "doctor",
     "doctor_fix",
@@ -2197,8 +2199,43 @@ def _propose_mode_change(
         "current": mode_view(),
         "question": question_view(question),
         "note": (
-            "a proposal changes nothing; only the owner sets the mode with "
-            "`orch mode set` or the Questions page"
+            "a proposal changes nothing; only the owner switches. With the owner-prompt "
+            "hook installed the owner types `/saberops-away <duration>` in chat; without "
+            "it the owner runs `orch mode request <mode> ...` and then `orch mode confirm "
+            "<code>` in a terminal, because the code is shown only there. Tightening to "
+            "ask-me is always allowed directly with `tighten_mode`."
+        ),
+    }
+
+
+def _tighten_mode(
+    context: ServerContext, arguments: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Switch to ask-me; the only mode change the planner may make directly."""
+    from saberops.mode_switch import tighten_from_planner
+
+    reason = arguments.get("reason")
+    if reason is not None and (not isinstance(reason, str) or not reason.strip()):
+        raise InvalidParamsError("reason must be non-empty text")
+    view, changed = tighten_from_planner()
+    context.ledger.append(
+        "mode_change_applied",
+        {
+            "mode": view["mode"],
+            "declared_mode": view["declared_mode"],
+            "source": "planner:tighten_mode",
+            "changed": changed,
+            "reason": reason,
+        },
+    )
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "applied": changed,
+        "mode": view,
+        "note": (
+            "ask-me applies: the planning session may only tighten the mode. A "
+            "looser mode stays an owner decision (propose_mode_change, the typed "
+            "chat command, or the terminal confirmation code)."
         ),
     }
 
@@ -2785,6 +2822,14 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
             required=("mode", "rationale", "proposed_by"),
         ),
         _propose_mode_change,
+        mutating=True,
+    )
+    register(
+        "tighten_mode",
+        "Switch the owner mode to ask-me. Always allowed because it only tightens; "
+        "any looser mode stays an owner decision.",
+        _schema({"reason": {"type": "string", "minLength": 1}}),
+        _tighten_mode,
         mutating=True,
     )
     register(

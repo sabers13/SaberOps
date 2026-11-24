@@ -132,6 +132,16 @@ def get_owner_mode_path() -> Path:
     return saberops_config_dir() / "mode.json"
 
 
+def get_mode_confirmation_path() -> Path:
+    """Return the pending owner-mode change awaiting its confirmation code."""
+    return saberops_state_dir() / "mode-confirmation.json"
+
+
+def get_mode_switch_log_path() -> Path:
+    """Return the append-only log of owner-mode switch attempts."""
+    return saberops_state_dir() / "mode-switches.jsonl"
+
+
 def get_runtime_gate_path() -> Path:
     """Return the durable work-gate document path (pause state, presence)."""
     return saberops_state_dir() / "runtime-gate.json"

@@ -84,6 +84,7 @@ first missing step with no stored cursor.
 | `list_proposals` | no | — | `saberops.config.ConfigLedger.entries` |
 | `get_mode` | no | — | `saberops.owner_mode.mode_view` |
 | `propose_mode_change` | yes | `mode`, `until`, `rationale`, `proposed_by` | raises an owner question; never changes the mode |
+| `tighten_mode` | yes | `reason` (optional) | switches to `ask-me` only; tightening is always allowed |
 | `get_pause` | no | — | `saberops.runtime_gate.gate_view` |
 
 Resuming a paused work gate is owner-only: `orch resume` is the one
@@ -336,8 +337,12 @@ proposal. It **applies nothing**: only the owner approving through
 `get_mode` is read-only: it returns the effective owner mode, its permission
 ceiling and every decision the mode permits or parks; a saved store can only
 narrow that ceiling (ADR-0082). `propose_mode_change` raises an owner question
-and **never flips the mode**; only the owner sets it with `orch mode set` or the
-Questions page (ADR-0020).
+and **never flips the mode**; only the owner sets it with `orch mode set`, the
+Questions page, a typed `/saberops-away <duration>` command where the CLI's
+owner-prompt hook is installed, or the terminal
+`orch mode request` / `orch mode confirm <code>` pair (ADR-0090). `tighten_mode`
+may switch to `ask-me` directly: it only removes permission, so the planner can
+always make the engine more careful, never less.
 
 `get_pause` is read-only: it reports the work gate -- running, or paused with
 its reason, the plan and worker state, the paused jobs and the owner command

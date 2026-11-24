@@ -160,10 +160,15 @@ drift without sending prompts or reading credentials.
 ## Owner mode: one switch for what may run without you
 
 One persisted owner setting decides what SaberOps may do without asking:
-`ask-me` (default), `critical-only` or `away`. Only the owner switches it with
-`orch mode show|set|clear` or the Questions page. An `away` session needs an
-end time, a job budget, or both (`--until`, `--max-jobs`); an expired `away`
-behaves as `ask-me`.
+`ask-me` (default), `critical-only` or `away`. Only the owner switches it, with
+`orch mode show|set|clear`, the Questions page, or a typed
+`/saberops-away 2h` / `/saberops-critical-only` / `/saberops-ask-me` message in a
+chat whose CLI has the owner-prompt hook installed
+(`orch mode hook install --cli claude`). A planner may always tighten to
+`ask-me`; anything looser without the hook needs a short confirmation code that
+`orch mode request` prints only on the owner's terminal and `orch mode confirm`
+consumes (ADR-0090). An `away` session needs an end time, a job budget, or both
+(`--until`, `--max-jobs`); an expired `away` behaves as `ask-me`.
 
 Each mode carries a fixed permission ceiling. A saved store can only narrow it
 (an upgraded store keeps exactly the permissions it had), never widen it.

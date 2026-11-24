@@ -132,8 +132,13 @@ the CLI (`orch mode set`) or the Questions page.
 
 - Call `get_mode` to read the effective mode and what it permits. Never claim a
   mode you have not read.
+- `tighten_mode` switches to `ask-me`; it only removes permission, so it is
+  always allowed from the planning session. Any looser mode is the owner's.
 - `propose_mode_change` raises an owner question. It never changes the mode, so
-  do not tell the user the mode changed.
+  do not tell the user the mode changed. With the owner-prompt hook installed
+  the owner types `/saberops-away <duration>`, `/saberops-critical-only` or
+  `/saberops-ask-me` in chat; without it, the owner runs `orch mode request` and
+  `orch mode confirm` in a terminal, where the code is shown.
 - In `ask-me`, every question waits for the owner. In `critical-only`, a live
   planning session may answer a **routine** question (`critical: false`) with
   `answer_question`, following the question's stored recommendation and
@@ -443,7 +448,9 @@ accepted on its own.
 - `list_questions` shows what is waiting. You may answer only planner-level
   questions (`answer_question` with authority PLAN).
 - `get_mode` reads the owner mode; `propose_mode_change` raises an owner
-  question about it. Neither can switch the mode: only the owner does that.
+  question about it. `tighten_mode` may switch it to `ask-me` (it only
+  tightens). Nothing switches it to a looser mode from a chat without the
+  owner's typed command or terminal confirmation code.
 - Owner decisions are never yours: accepting or rejecting changes, approving
   configuration, billing, merging, pushing. Tell the owner what to decide and where.
 - To suggest a setting, use `propose_config_change` with a short rationale. It

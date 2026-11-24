@@ -26,6 +26,7 @@ from saberops.gate_runner import GateScratchPolicyError
 from saberops.gate_status import gate_summary_label
 from saberops.git import GitManager
 from saberops.jobs.models import JobRole
+from saberops.mode_switch import HOOK_SUPPORT
 from saberops.model_access import ReadinessService
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
@@ -51,6 +52,7 @@ from saberops.owner_mode import (
     OwnerMode,
     OwnerModeError,
     clear_owner_mode,
+    load_owner_mode_settings,
     mode_view,
     parse_owner_mode,
     set_host_access,
@@ -1748,6 +1750,60 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode_host.add_argument("mode", choices=[mode.value for mode in HostAccessMode], type=str)
     mode_host.add_argument("--json", action="store_true", help="JSON output")
+
+    mode_request = mode_sub.add_parser(
+        "request",
+        help=(
+            "Create a pending mode change and print its confirmation code on this "
+            "terminal (a looser switch without a chat hook)."
+        ),
+    )
+    mode_request.add_argument(
+        "mode",
+        choices=[mode.value for mode in OWNER_MODE_ORDER],
+        type=str,
+        help="Exact owner mode id: " + ", ".join(m.value for m in OWNER_MODE_ORDER) + ".",
+    )
+    mode_request.add_argument(
+        "--until", default=None, help="Optional ISO-8601 end time with timezone; away only."
+    )
+    mode_request.add_argument(
+        "--max-jobs", dest="max_jobs", type=int, default=None,
+        help="Optional away-mode job budget; away needs this or --until.",
+    )
+
+    mode_confirm = mode_sub.add_parser(
+        "confirm", help="Apply a pending mode change with the code shown on this terminal."
+    )
+    mode_confirm.add_argument("code", help="The code `orch mode request` printed.")
+
+    mode_hook = mode_sub.add_parser(
+        "hook", help="Run or install the typed-command hook on the owner's chat message."
+    )
+    mode_hook_sub = mode_hook.add_subparsers(dest="mode_hook_command", required=True)
+    hook_run = mode_hook_sub.add_parser(
+        "run", help="Handle one hook payload from stdin (installed in the CLI's settings)."
+    )
+    hook_run.add_argument(
+        "--cli", required=True, choices=[row.cli for row in HOOK_SUPPORT], type=str
+    )
+    hook_install = mode_hook_sub.add_parser(
+        "install", help="Merge SaberOps's hook into the CLI's own settings file."
+    )
+    hook_install.add_argument(
+        "--cli", required=True, choices=[row.cli for row in HOOK_SUPPORT], type=str
+    )
+    hook_install.add_argument("--dry-run", action="store_true", help="Show the change without writing.")
+    hook_remove = mode_hook_sub.add_parser(
+        "remove", help="Remove only SaberOps's hook entry from the CLI's settings file."
+    )
+    hook_remove.add_argument(
+        "--cli", required=True, choices=[row.cli for row in HOOK_SUPPORT], type=str
+    )
+    hook_support_parser = mode_hook_sub.add_parser(
+        "support", help="Show which planner CLIs have an owner-prompt hook."
+    )
+    hook_support_parser.add_argument("--json", action="store_true", help="JSON output")
 
     # orch away show|grant|revoke|policy|summary|reset-breaker
     away_parser = subparsers.add_parser(
@@ -6028,6 +6084,8 @@ def _print_mode_view(view: dict[str, Any]) -> None:
     if view.get("max_jobs") is not None:
         print(f"Job budget    : {view['max_jobs']}")
     print(f"Host access   : {view['host_access']}")
+    if view.get("set_by"):
+        print(f"Set by        : {view['set_by']}")
     print(f"Source        : {view['source']} {view['source_path'] or '(packaged default)'}")
     print(f"Config path   : {view['config_path']}")
     print("Decisions:")
@@ -6103,6 +6161,17 @@ def handle_mode_set(args: argparse.Namespace) -> int:
     away_state, away_warning = ("not-set", None)
     if mode is OwnerMode.AWAY:
         away_state, away_warning = _away_policy_warning()
+    from saberops.mode_switch import record_mode_switch
+
+    saved = load_owner_mode_settings()
+    record_mode_switch(
+        source="cli",
+        outcome="applied",
+        mode=saved.mode.value,
+        until=saved.until,
+        max_jobs=saved.max_jobs,
+        detail="the owner ran `orch mode set`",
+    )
     if getattr(args, "json", False):
         payload: dict[str, Any] = {
             "mode": mode.value,
@@ -6147,6 +6216,92 @@ def handle_mode_clear(args: argparse.Namespace) -> int:
         print("No saved owner mode; ask-me already applies.")
     else:
         print(f"Owner mode cleared at {path}; ask-me applies.")
+    return 0
+
+
+def _stdin_is_a_terminal() -> bool:
+    """True only when stdin is the owner's terminal, never an agent pipe."""
+    return bool(getattr(sys.stdin, "isatty", lambda: False)())
+
+
+def handle_mode_request(args: argparse.Namespace) -> int:
+    """Handle `orch mode request <mode>`: a pending change plus its code."""
+    from saberops.mode_switch import ModeSwitchError, request_mode_change
+
+    if not _stdin_is_a_terminal():
+        print(
+            "[!] Run `orch mode request` in the owner's terminal: the confirmation "
+            "code is shown only there, never in a chat or a tool result.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        pending = request_mode_change(
+            args.mode, until=args.until, max_jobs=args.max_jobs
+        )
+    except (ModeSwitchError, OwnerModeError, OSError) as exc:
+        print(f"[!] Could not request the mode change: {exc}", file=sys.stderr)
+        return 1
+    until = f" until {pending.until}" if pending.until else ""
+    jobs = f", up to {pending.max_jobs} job(s)" if pending.max_jobs else ""
+    print(f"Pending owner mode: {pending.mode.value}{until}{jobs}")
+    print(f"Confirmation code: {pending.code}")
+    print("Apply it on this terminal within 15 minutes:")
+    print(f"  orch mode confirm {pending.code}")
+    return 0
+
+
+def handle_mode_confirm(args: argparse.Namespace) -> int:
+    """Handle `orch mode confirm <code>`: apply the pending change once."""
+    from saberops.mode_switch import ModeSwitchError, confirm_mode_change
+
+    try:
+        settings = confirm_mode_change(args.code)
+    except (ModeSwitchError, OwnerModeError, OSError) as exc:
+        print(f"[!] Could not confirm the mode change: {exc}", file=sys.stderr)
+        return 1
+    until = f" until {settings.until}" if settings.until else ""
+    print(f"Owner mode set to '{settings.mode.value}'{until} (owner confirmation code)")
+    print("The selected mode applies its permission ceiling; nothing can widen it.")
+    return 0
+
+
+def handle_mode_hook(args: argparse.Namespace) -> int:
+    """Handle `orch mode hook run|install|remove|support`."""
+    from saberops.mode_switch import (
+        describe_hook_support,
+        install_mode_hook,
+        remove_mode_hook,
+        run_hook,
+    )
+
+    if args.mode_hook_command == "support":
+        rows = describe_hook_support()
+        if getattr(args, "json", False):
+            print(json.dumps(rows, indent=2))
+            return 0
+        for row in rows:
+            state = "supported" if row["supported"] else "unsupported"
+            print(f"{row['cli']:<12} {state:<12} hint: {row['reason']}")
+        return 0
+    if args.mode_hook_command == "install":
+        result = install_mode_hook(args.cli, dry_run=args.dry_run)
+        print(result.message)
+        return 0 if result.ok else 1
+    if args.mode_hook_command == "remove":
+        result = remove_mode_hook(args.cli)
+        print(result.message)
+        return 0 if result.ok else 1
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[!] Hook payload is not JSON: {exc}", file=sys.stderr)
+        return 0
+    outcome = run_hook(args.cli, payload)
+    if outcome.status == "applied":
+        print(f"SaberOps: {outcome.detail}")
+    elif outcome.status in {"refused", "unsupported"}:
+        print(f"SaberOps: mode unchanged: {outcome.detail}", file=sys.stderr)
     return 0
 
 
@@ -8759,6 +8914,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_mode_clear(args)
         elif args.mode_command == "set-host-access":
             return handle_mode_set_host_access(args)
+        elif args.mode_command == "request":
+            return handle_mode_request(args)
+        elif args.mode_command == "confirm":
+            return handle_mode_confirm(args)
+        elif args.mode_command == "hook":
+            return handle_mode_hook(args)
     elif args.command == "away":
         if args.away_command == "show":
             return handle_away_show(args)

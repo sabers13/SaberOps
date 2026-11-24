@@ -18,9 +18,12 @@ than inspecting a boolean on its own. A refusal is a typed
 :class:`ModeDecision` with a human-readable reason, so a page or CLI can
 explain it without guessing.
 
-Only the owner changes the mode: ``orch mode set|clear`` and the local web
-toggle. MCP exposes a read-only ``get_mode`` and a ``propose_mode_change`` that
-raises an owner question; it never flips the mode.
+Only the owner changes the mode: ``orch mode set|clear``, the local web toggle, an
+owner-typed chat command handled by a CLI's owner-prompt hook, or the terminal
+confirmation code for a looser change without that hook (ADR-0090).  MCP
+exposes a read-only ``get_mode``, a ``propose_mode_change`` that raises an owner
+question, and a ``tighten_mode`` that may only switch to ``ask-me``: a planner
+can always make the engine more careful, never less.
 """
 
 from __future__ import annotations
