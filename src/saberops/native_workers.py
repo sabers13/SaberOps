@@ -430,6 +430,7 @@ def _new_run(db: Database, job: Job, *, vendor: str, model: str) -> Run:
         project_id=provenance.project_id,
         project_identity_json=provenance.identity.to_json(),
         objective_id=provenance.objective_id,
+        job_id=job.job_id,
     )
     db.create_run(run)
     return run

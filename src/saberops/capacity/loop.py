@@ -792,6 +792,7 @@ def _default_run_launcher(
         project_id=provenance.project_id,
         project_identity_json=provenance.identity.to_json(),
         objective_id=provenance.objective_id,
+        job_id=job.job_id,
     )
     db.create_run(run)
     # Durable resume wiring -- and ONLY resume wiring:

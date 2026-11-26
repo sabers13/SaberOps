@@ -758,6 +758,10 @@ class Run:
     project_id: str | None = None
     project_identity_json: str | None = None
     objective_id: str | None = None
+    # The durable job that dispatched this run (None for a plain ``orch run``
+    # or a legacy row).  Recorded so acceptance and the commit trailer can name
+    # the job without a cross-store lookup (lane H44, ADR-0102).
+    job_id: str | None = None
     # Immutable non-secret quota policy contract captured when the run is created.
     control_plane_snapshot_json: str | None = None
     control_plane_snapshot_digest: str | None = None

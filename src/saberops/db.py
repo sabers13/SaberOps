@@ -325,6 +325,7 @@ class Database:
                     project_id TEXT,
                     project_identity_json TEXT,
                     objective_id TEXT,
+                    job_id TEXT,
                     gateway_snapshot_json TEXT,
                     gateway_snapshot_digest TEXT
                 );
@@ -913,6 +914,11 @@ class Database:
                 for column in ("project_id", "project_identity_json", "objective_id"):
                     if column not in columns:
                         conn.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
+                # H44 (ADR-0102): the dispatching job id. Existing rows keep
+                # NULL and stay readable; the resolve path falls back to the
+                # job's own run chain.
+                if "job_id" not in columns:
+                    conn.execute("ALTER TABLE runs ADD COLUMN job_id TEXT")
                 attempt_columns = {
                     str(row["name"]) for row in conn.execute("PRAGMA table_info(attempts)")
                 }
@@ -980,8 +986,8 @@ class Database:
                         routing_snapshot_json,
                         control_plane_snapshot_json, control_plane_snapshot_digest,
                         tool_contract_json, tool_contract_digest,
-                        project_id, project_identity_json, objective_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        project_id, project_identity_json, objective_id, job_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.id,
@@ -1007,6 +1013,7 @@ class Database:
                         run.project_id,
                         run.project_identity_json,
                         run.objective_id,
+                        run.job_id,
                     ),
                 )
             except sqlite3.OperationalError as provenance_exc:
@@ -1226,6 +1233,7 @@ class Database:
                 project_id=_optional_text(row, "project_id"),
                 project_identity_json=_optional_text(row, "project_identity_json"),
                 objective_id=_optional_text(row, "objective_id"),
+                job_id=_optional_text(row, "job_id"),
                 gateway_snapshot_json=_optional_text(row, "gateway_snapshot_json"),
                 gateway_snapshot_digest=_optional_text(row, "gateway_snapshot_digest"),
             )
@@ -2457,6 +2465,7 @@ class Database:
                         project_id=_optional_text(row, "project_id"),
                         project_identity_json=_optional_text(row, "project_identity_json"),
                         objective_id=_optional_text(row, "objective_id"),
+                        job_id=_optional_text(row, "job_id"),
                         gateway_snapshot_json=_optional_text(row, "gateway_snapshot_json"),
                         gateway_snapshot_digest=_optional_text(row, "gateway_snapshot_digest"),
                     )
