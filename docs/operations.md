@@ -490,6 +490,35 @@ never enters a reviewed diff. Editing it changes the next attempt only; earlier
 attempts keep their own snapshot and digest. See
 [ADR-0021](decisions/0021-worker-evidence-and-project-notes.md).
 
+## Commit provenance (`orch provenance`)
+
+An accepted candidate commit links back to the job, run and attempt that
+produced it (ADR-0102). When the engine makes the commit, the message ends with
+a trailer block naming the job, run, attempt, base, worker CLI and model. When
+acceptance installs the commit, SaberOps adds a Git note under
+`refs/notes/saberops` with the facts that only exist afterwards: gate result and
+receipt digest, review id, verdict and finding count, the transcript path and
+whether it was present, accepted-at and the final branch.
+
+```bash
+orch provenance <commit-or-ref> [--repo PATH] [--json]
+orch provenance path/to/file.py:42 --repo ~/projects/foo
+```
+
+The trailers travel with the commit into every clone. **Notes stay local until
+you push or fetch that ref**; SaberOps never pushes it for you:
+
+```bash
+git push origin refs/notes/saberops
+git fetch origin refs/notes/saberops:refs/notes/saberops
+```
+
+Run and attempt records are never deleted, so a lookup still names them after
+storage retention removes the transcript file; it then reports the transcript
+as removed. A commit made by the worker itself is never reworded, so it carries
+no trailer — the acceptance note links it instead. A commit with no SaberOps
+provenance (anything made before lane H44) is reported as such.
+
 ## Watching running jobs (`orch watch`)
 
 `orch watch [--repo PATH] [--job JOB_ID] [--session NAME] [--interval SECONDS]`
