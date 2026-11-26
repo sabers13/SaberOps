@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -42,12 +43,19 @@ HOSTS = {
 
 
 @pytest.fixture()
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_vendor_cli: Callable[[str], Path],
+) -> Path:
     base = tmp_path / "home"
     base.mkdir()
     monkeypatch.setenv("HOME", str(base))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(base / ".config"))
     monkeypatch.setattr(agent_connect, "_home", lambda _home=None: base)
+    # `orch connect claude` runs the host CLI's own `mcp` command in the
+    # installed branch.  Supply a stub instead of depending on this machine.
+    fake_vendor_cli("claude")
     return base
 
 

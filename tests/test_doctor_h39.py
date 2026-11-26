@@ -13,6 +13,7 @@ import platform
 import shutil
 import sqlite3
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -416,12 +417,18 @@ def test_legacy_state_recheck_still_reports_when_fix_did_not_work(
 
 
 def test_cli_doctor_without_fix_stays_read_only_and_fix_repairs(
-    scratch_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    scratch_home: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    fake_vendor_cli: Callable[[str], Path],
 ) -> None:
     import argparse
 
     from saberops.paths import saberops_state_dir
 
+    # The doctor fails when no worker provider is AVAILABLE.  Supply a stub
+    # provider CLI rather than depending on the host having one installed.
+    fake_vendor_cli("opencode")
     db_file = tmp_path / "owner.db"
     args = argparse.Namespace(
         repo=str(Path.cwd()), db=str(db_file), fix=False, json=False, delete_legacy=False

@@ -1,5 +1,5 @@
 {
-  "logic_lines": 176911,
+  "logic_lines": 176936,
   "suppression_comments": 354,
-  "reason": "H41: gate config overrides and switch-offs (ADR-0097); H40: the exported-XDG regression drill"
+  "reason": "H40b: stub vendor CLIs for tests that exercise the installed branch (ADR-0099)"
 }

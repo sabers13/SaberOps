@@ -15,7 +15,8 @@ every test unless the test asks for it with ``@pytest.mark.memory_guard``.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import sys
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,31 @@ def _v040_routing_default(
     # and the checks directly with fake versions.
     monkeypatch.setenv("SABEROPS_VENDOR_CHECKS", "0")
     yield
+
+
+@pytest.fixture()
+def fake_vendor_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[str], Path]:
+    """Put a stub vendor CLI at the front of ``PATH`` for this test.
+
+    A few tests drive the CLI's *installed* branch (``orch connect claude``,
+    ``orch doctor``).  They must supply that fact themselves: otherwise the
+    result depends on whether the machine running the suite happens to have
+    Claude Code, Codex, OpenCode or Antigravity installed.  The stub exits 0
+    without doing anything, so no real vendor CLI or network is touched.
+    """
+    bin_dir = tmp_path / "vendor-bin"
+    bin_dir.mkdir()
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join((str(bin_dir), os.environ.get("PATH", "")))
+    )
+
+    def install(name: str) -> Path:
+        path = bin_dir / name
+        path.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    return install
 
 
 @pytest.fixture(autouse=True)
