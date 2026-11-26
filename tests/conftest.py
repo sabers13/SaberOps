@@ -24,6 +24,21 @@ from saberops import routing_config
 
 _V040_DEFAULT = Path(__file__).resolve().parent / "fixtures" / "routing_v040_default.json"
 
+#: The XDG bases every test must keep off a real home, and their subdirectory.
+_XDG_BASES = (
+    ("XDG_CONFIG_HOME", "config"),
+    ("XDG_STATE_HOME", "state"),
+    ("XDG_CACHE_HOME", "cache"),
+    ("XDG_DATA_HOME", "data"),
+)
+
+#: Base values captured before pytest started any fixture.  A test-run value
+#: equal to one of these is *inherited* (GitHub's runner exports
+#: ``XDG_CONFIG_HOME=/home/runner/.config``) and must be replaced; any other
+#: value was set deliberately by a test's own module or session fixture (a
+#: seeded routing/control-plane tree) and must win.
+_INHERITED_XDG = {variable: os.environ.get(variable) for variable, _ in _XDG_BASES}
+
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
@@ -48,19 +63,17 @@ def _isolated_owner_store(
     ADR-0082's owner-mode reader migrates a pre-1.1 document on the first read,
     so a test that reached ``~/.config/saberops`` would *write* the owner's real
     store.  That happened once (H22 postmortem, 2026-11-23): this host leaves
-    ``XDG_CONFIG_HOME`` unset, so the loader fell back to the real home.  Fill in
-    only the XDG bases a test has not set itself, then prove the owner config
-    path resolves inside this test's scratch tree; a test that would reach the
-    real home fails instead of writing it.
+    ``XDG_CONFIG_HOME`` unset, so the loader fell back to the real home.  H40
+    (ADR-0096) closes the other half: GitHub's Ubuntu runner *exports*
+    ``XDG_CONFIG_HOME=/home/runner/.config``, so filling only unset bases let
+    every test resolve the runner's real home.  Replace a base that is unset or
+    still carries the pre-pytest value; a value a test's own module or session
+    fixture set (a seeded routing/control-plane tree) wins as before.  Then
+    prove the owner config path resolves inside the pytest tree.
     """
     scratch = tmp_path.parent / f"{tmp_path.name}-owner-xdg"
-    for variable, name in (
-        ("XDG_CONFIG_HOME", "config"),
-        ("XDG_STATE_HOME", "state"),
-        ("XDG_CACHE_HOME", "cache"),
-        ("XDG_DATA_HOME", "data"),
-    ):
-        if os.environ.get(variable):
+    for variable, name in _XDG_BASES:
+        if os.environ.get(variable) not in (None, _INHERITED_XDG[variable]):
             continue
         directory = scratch / name
         directory.mkdir(parents=True, exist_ok=True)

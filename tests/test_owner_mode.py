@@ -153,6 +153,31 @@ def test_conftest_guard_keeps_every_test_off_the_real_owner_store() -> None:
     assert real not in resolved.parents
 
 
+def test_conftest_guard_replaces_every_exported_xdg_base(tmp_path: Path) -> None:
+    """H40: an *exported* real-home XDG base must not survive the guard.
+
+    GitHub's Ubuntu runner exports ``XDG_CONFIG_HOME=/home/runner/.config``.
+    While the guard filled only unset bases, every test resolved that real home
+    and errored on the H22 assertion (32 passed, 3,162 errors).  Each of the
+    four bases must now point inside this test's scratch tree even when the
+    process environment carried a value in; run this file with the four
+    variables exported to a scratch home to see the failure this guards.
+    """
+    scratch = tmp_path.parent.resolve()
+    for variable in (
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+    ):
+        value = os.environ.get(variable)
+        assert value, f"the autouse guard did not set {variable}"
+        assert Path(value).resolve().is_relative_to(scratch), (
+            f"{variable}={value} kept a value from outside the test scratch tree; "
+            "the guard must point every XDG base at the test-scoped tree"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # No widening: every legacy preset x mode pair
 # --------------------------------------------------------------------------- #

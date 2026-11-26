@@ -1,5 +1,5 @@
 {
-  "logic_lines": 176897,
+  "logic_lines": 176911,
   "suppression_comments": 354,
-  "reason": "H41: protect gate config overrides and added switch-off directives (ADR-0097)"
+  "reason": "H41: gate config overrides and switch-offs (ADR-0097); H40: the exported-XDG regression drill"
 }
