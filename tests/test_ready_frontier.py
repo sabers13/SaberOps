@@ -198,7 +198,7 @@ def test_completion_releases_dependent_and_failure_holds_it() -> None:
 
 
 def test_overlapping_write_scope_is_held_but_disjoint_scope_is_eligible() -> None:
-    """Covers: WORKFLOW section 16 - exclusive write scopes; disjoint lanes progress."""
+    """Covers: exclusive write scopes; disjoint lanes progress."""
     snapshot = _snapshot(
         _project(
             "p1",
@@ -213,7 +213,7 @@ def test_overlapping_write_scope_is_held_but_disjoint_scope_is_eligible() -> Non
 
 
 def test_subtree_scope_overlap_is_detected() -> None:
-    """Covers: subtree write-scope overlap uses the same semantics as parallel_work."""
+    """Covers: a directory scope and a file inside it are one write scope."""
     snapshot = _snapshot(
         _project(
             "p1",
@@ -498,7 +498,7 @@ def test_explicit_lower_limits_are_respected_not_silently_raised() -> None:
 
 
 def test_eligibles_are_ordered_by_stable_identity_not_display_number() -> None:
-    """Covers: WORKFLOW section 15 - display number is not identity or order."""
+    """Covers: display number is not identity or order."""
     snapshot = _snapshot(
         _project(
             "p1",

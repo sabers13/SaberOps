@@ -40,7 +40,7 @@ def _write_synthetic_verified_postures(config_home: Path) -> None:
     """Seed an isolated owner config with a verified posture for the synthetic
     ``opencode`` candidate used by this module.
 
-    Covers: WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: authorized setup-only fixture migration.
     Adds ONLY a synthetic provider/posture record needed to preserve the
     module's historical control-flow assertions now that unverified routes
     fail closed (F1); no assertion is changed and no real vendor receives an

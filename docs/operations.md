@@ -123,8 +123,9 @@ candidate wins, and candidates within that winning group are prioritized
 by their intra-group binding-window pacing score:
 `pace = (remaining_pct - red_line_pct - reserve_pct - cost_estimate_pct) / max(hours_to_reset, 0.25)`.
 Ties break deterministically by original chain order, then by lower estimated
-cost. The classifier still labels the run tier (a risk/telemetry label), but
-it no longer selects routes. Provider readiness, quota, capabilities, exact
+cost. The planner-recorded difficulty labels the run tier (a risk/telemetry
+label), and it selects the base tier through `strong_start`; there is no keyword
+classifier. Provider readiness, quota, capabilities, exact
 bindings and owner model enrollment still apply. Schema 3 routing files hold `roles.BUILD` plus a top-level `strong_start`, each a
 list of `{"routes": [...]}` groups. The check binding keeps its ordered list in
 `orch reviewer show`, and the plan role is the connected agent with no engine
@@ -194,8 +195,8 @@ owner config/UI change.
 
 **Scope limitation (honest):** this is aggregate admission only. It does **not**
 enforce the owner's project-aware policy of *3 concurrently active projects ×
-5 executing tasks per project*, because M2-4b has no durable registered project
-identity or wave-child task identity yet. The status is:
+5 executing tasks per project*: the project registry holds durable project
+identity, but the scheduler has no project-aware admission. The status is:
 `GLOBAL AGGREGATE IMPLEMENTED / PROJECT-AWARE DIMENSIONS DEFERRED`. This
 ceiling is independent of, and does not replace, provider-pool maxima, quota
 red lines, billing posture, gate-slot or host limits.

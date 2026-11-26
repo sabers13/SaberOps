@@ -68,7 +68,7 @@ def _seed_verified_opencode_posture(config_home: Path) -> None:
     """Seed an isolated owner config with a verified class-A posture for the
     synthetic ``opencode`` reviewer provider these fixtures dispatch.
 
-    Covers: WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: authorized setup-only fixture migration.
     The R3-E1.2 fixtures dispatch synthetic ``opencode`` reviewer candidates
     with no matching posture record, so the accepted M2-4b F1 admission seam
     rightfully returns ``REVIEW_UNAVAILABLE`` (POSTURE_UNVERIFIED).  This seeds

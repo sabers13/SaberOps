@@ -332,7 +332,8 @@ planning session no self-answer is possible and no background planner starts
 
 `propose_config_change` validates the change and returns an approval-ready
 proposal. It **applies nothing**: only the owner approving through
-`orch config approve <id>` or the local web surface writes the config ledger.
+`approve_config_proposal` writes the config ledger, and no MCP tool, CLI verb or
+web route exposes that approval today.
 
 `get_mode` is read-only: it returns the effective owner mode, its permission
 ceiling and every decision the mode permits or parks; a saved store can only

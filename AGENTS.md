@@ -35,7 +35,7 @@ not authorize an autonomous engine: LLMs advise; deterministic software decides.
    upper-bound limits** (not a quota or occupancy target). The runtime may run
    1 of 15 allowed tasks. Eligibility never equals obligation to dispatch.
 6. Worker implementation candidates receive G0/G1 plus one task-scoped
-   independent review. **Pure Integrator merges, bridge-test-only commits, and
+   independent review. **Pure landing merges, bridge-test-only commits, and
    post-G3 looks get no automatic semantic review**; material production
    glue/behavior changes found at integration go back to an accountable Worker
    for G1 and task-scoped review. The exclusive integration gate (G3) and owner

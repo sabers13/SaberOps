@@ -11,7 +11,7 @@ decision in an append-only ledger. The implementation is
 policy for workflow settings: it defines the canonical values, their validation
 rules, and the frozen snapshot/hash that the audit ledger records. It is the
 single declared source of truth for these settings; runtime consumers adopt it
-incrementally (the gate-slot, retention and wave layers still read their own
+incrementally (the gate-slot and retention layers still read their own
 frozen constants until a follow-up step imports them from here — see
 "Adoption" below).
 

@@ -8,7 +8,7 @@ the deterministic set of tasks that may be *started now*, plus a reasoned hold
 for every task that may not. It recomputes the eligible set across **all named
 phases at once**: a task in Phase 4 is startable while a Phase 1 dependency is
 blocked, because phases and three-digit display steps are presentation labels,
-never dependency edges (WORKFLOW.md sections 15-17).
+never dependency edges.
 
 What this module is deliberately NOT
 ------------------------------------

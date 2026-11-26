@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Read-only test hygiene report: retirement candidates, never deletions.
 
-After each G3 PASS and map rebuild the Integrator runs this tool (read-only:
-coverage map + ``result/full.xml`` + git; it executes no tests and imports no
-``src`` module) to list *candidates* for the orchestrator's retirement table.
-See ``docs/gate.md`` ("Test hygiene report") and ``.orch/WORKFLOW.md`` §5.
+After a full-gate PASS and a map rebuild this tool reads the coverage map,
+``result/full.xml`` and git (it executes no tests and imports no ``src``
+module) to list *candidates* for a retirement decision.
+See ``docs/gate.md`` ("Test hygiene report").
 
 Usage:
     scripts/test_hygiene.py [--repo PATH] [--map DIR] [--junit PATH]
@@ -34,10 +34,7 @@ sys.dont_write_bytecode = True
 # test_capacity_ledger.py do not match.
 TASK_NAMED_RE = re.compile(r"^test_(?:[a-z]{1,3}\d[a-z0-9]*|i\d{3})_")
 
-FOOTER = (
-    "Candidates only. Retirement happens through a prompt's "
-    '"Tests retired / rewritten" table (WORKFLOW §9 rule 12).'
-)
+FOOTER = "Candidates only. This tool never retires or deletes a test."
 
 SRC_PACKAGE = PurePosixPath("src/saberops")
 SRC_SCAN_ROOT = PurePosixPath("src")

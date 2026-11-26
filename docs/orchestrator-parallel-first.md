@@ -41,11 +41,9 @@ validation and owner approval path.
 - Parallel work is **several jobs or PLAN.md lanes**: a plan submits one
   ordinary job per ready lane; each job is one worker with one objective.  It is
   not a cross-project, continuously refilled scheduler.
-- Early pure slices may exist on unmerged branches (for example a 3x5
-  project-child slot-admission projection, and a cross-phase ready-frontier
-  readiness projection such as `saberops.ready_frontier`). These are pure
-  **projections**. They perform no dispatch, hold no lease and are not launch
-  authority on their own.
+- Pure *projections* (for example the cross-phase ready-frontier readiness
+  projection in `saberops.ready_frontier`) perform no dispatch, hold no lease
+  and are not launch authority on their own.
 - Step 015 plan-data layer: `saberops.project.ProjectRegistry`
   (explicit stable slugs, duplicate/malformed/inferred refusal, durable
   3-active-project cap), `saberops.project_scope.plan_store`
@@ -69,7 +67,7 @@ per-host storage reservation budget; exclusive worktree scopes; real G1,
 independent-review, exclusive-G3 and owner-acceptance gates; exact-SHA
 provenance and lease fencing; and a UI that shows real ready/blocked/held
 reasons. This is implemented by existing steps (project/plan registration,
-durable settings, wave admission, session management, first-run UI, security),
+durable settings, session management, first-run UI, security),
 **not** by the fact that this document exists. Do not label any
 of it operational until those steps pass their gates, independent review and
 owner acceptance.
@@ -79,7 +77,7 @@ owner acceptance.
 Read, in this order, before drafting any plan or status report:
 
 1. `README.md` and `AGENTS.md` (root).
-2. `docs/parallel-work.md` (current parallel-team behaviour).
+2. `docs/parallel-work.md` (current parallel work behaviour).
 3. This file.
 4. `pyproject.toml` and `src/saberops/DESIGN.md` (engineering/design contract).
 5. The ADR set that governs the work in scope.

@@ -1,7 +1,7 @@
 # Owner question queue and the five-part escalation protocol (Q-1, Step 012)
 
-The engine never guesses an owner decision (WORKFLOW §7 as
-data). It raises a **keyed question** instead. This document describes the
+The engine never guesses an owner decision. It raises a **keyed question**
+instead. This document describes the
 queue that carries those questions from any role — including a worker mid-run —
 to the owner's answer, and the escalation protocol that accompanies them.
 

@@ -5,7 +5,7 @@ Reproduced constraint (OpenCode 1.18.x, General Compute upstream):
 * ``generalcompute/minimax-m2.7`` and ``generalcompute/deepseek-v3.1``
   succeed for harmless prose project instructions but fail with an opaque
   upstream ``403 Forbidden`` as soon as the request carries command-like
-  project instruction text (for example the canonical
+  project instruction text (for example the former
   ``python -m saberops.devscope scope`` scope-first instruction,
   with or without backticks).
 * ``OPENCODE_DISABLE_PROJECT_CONFIG=1`` avoids the automatic project

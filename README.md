@@ -117,7 +117,7 @@ flowchart LR
 | **Plan registry and billing posture** | Accounts → pools → windows; per-route posture class (A/B/C/D/X) with policy URL, owner verification date and TTL. Unverified or expired routes are never admitted unattended | [operations](docs/operations.md#plans-and-billing-posture) |
 | **Capacity ledger** | Usage observations, vendor exhaustion errors and learned per-job cost (EWMA by S/M/L size) feed admission and pacing | [operations](docs/operations.md#capacity-ledger-inspection-orch-capacity-show) |
 | **Role routing** | Three roles: **plan** (the CLI session you sit in), **build** (one worker per task, including repairs and a stronger-model `strong_start` setting on the build route) and **check** (an independent reviewer). Gates, landing, the memory and disk guard and cleanup are deterministic engine stages, not roles | [operations](docs/operations.md#build-routing-policy) |
-| **Gates G1 / G2 / G3** | Base-trusted gate profiles, gate slots sized to free RAM, gate history, coverage-mapped affected gate and a single-pass full gate | [gate](docs/gate.md), [operations](docs/operations.md#engine-run-gates-g1--g2--g3-and-the-history-ledger) |
+| **Gates G1 / G2 / G3** | Base-trusted gate profiles, gate slots sized to free RAM, gate history, coverage-mapped affected gate and a single-pass full gate | [gate](docs/gate.md), [operations](docs/operations.md#gate-execution-and-the-history-ledger) |
 | **Owner questions** | The engine never guesses an owner decision: keyed questions with a five-part escalation, answered verbatim from the CLI or web UI | [questions](docs/questions.md) |
 | **Unattended plans** | Frozen decision sheet, never-delegable list, three autonomous decision classes, circuit breaker, stall alarm and morning report. Unattended runs can never push | [unattended](docs/unattended-plans.md) |
 | **Storage lifecycle** | Owner-aware inventory, retention and guarded GC of worktrees, branches, checkpoint refs and evidence; dry-run first, never `--force` | [storage](docs/storage-lifecycle.md) |
@@ -232,9 +232,11 @@ orch connect all   # register SaberOps in Claude Code, Codex, Antigravity, OpenC
 ```
 
 In the web UI: **Setup** signs you in and finds your models, **Accounts**
-confirms how each subscription is billed (**Confirm all**, once), and
-**Routing** chooses which model writes and which independent model checks. Repairs
-run on the build route, and landing is automatic. Then open
+confirms how each subscription is billed (**Confirm all**, once), and the
+question queue carries the owner mode. Choose which model writes with
+`orch routing` and which independent model checks with `orch reviewer select`:
+the routing editor is no longer a web page. Repairs run on the build route, and
+landing follows the owner mode. Then open
 a new session in your agent and say **"turn on saberops"**; say **"turn off
 saberops"** to go back to a normal agent. Messages from SaberOps start with
 `Orchestrator:`. `orch mcp off` hides SaberOps from every agent.

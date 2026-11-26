@@ -53,7 +53,7 @@ _R3E1_CONNECTION = "r3e1-conn"
 
 @pytest.fixture()
 def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: WORKFLOW §7 authorized setup-only fixture migration
+    """Covers: authorized setup-only fixture migration
     for synthetic r3e1 candidates.
     """
     state = tmp_path / "state"
@@ -212,7 +212,7 @@ def _seed_configured_reviewer() -> str:
 
 
 def _seed_reviewable_run(db: Database, repo: Path, run_id: str) -> Run:
-    """Covers: WORKFLOW §7 authorized setup-only fixture migration
+    """Covers: authorized setup-only fixture migration
     for synthetic r3e1 reviewable run.
     """
     from saberops.control_plane.policy import freeze_control_plane_policy, load_control_plane_policy

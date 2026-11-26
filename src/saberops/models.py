@@ -744,7 +744,8 @@ class Run:
     config_json: str | None = None
     review_state_json: str | None = None
     # Frozen, JSON-serializable review-necessity decision.  Persisted
-    # at candidate-ready time by :func:`saberops.review_adaptive.decide_review`
+    # at candidate-ready time by
+    # :func:`saberops.review_adaptive.mandatory_review_decision`
     # and consulted by acceptance, supervisor recovery, retry, repair, and
     # handoff.  A missing value means the Run was created before adaptive review --
     # conservative reconstruction (no retroactive skip) is required.

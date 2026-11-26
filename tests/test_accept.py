@@ -702,7 +702,7 @@ def _seed_verified_opencode_posture(config_home: Path) -> None:
     """Seed an isolated owner config with a verified class-A posture for the
     synthetic ``opencode`` provider used by this module's dispatch fixtures.
 
-    Covers: WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: authorized setup-only fixture migration.
     The R3E1 fixtures dispatch synthetic ``opencode/<model>`` candidates with no
     matching posture record, so the accepted M2-4b admission seam rightfully
     returns ``quota_blocked`` (POSTURE_UNVERIFIED fails closed).  This seeds
