@@ -1,5 +1,5 @@
 {
-  "logic_lines": 177541,
+  "logic_lines": 178089,
   "suppression_comments": 355,
-  "reason": "H43: uncalled-definition caller evidence for the reviewer (ADR-0103)"
+  "reason": "H46: focused safety tests for the mutation-run gaps (ADR-0104)"
 }
