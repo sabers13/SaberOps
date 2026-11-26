@@ -1,11 +1,11 @@
 """H44: an accepted commit carries its job, run and attempt into Git.
 
-Real fake-worker path: a job is dispatched by the scheduler, its worker commits
-a candidate, the gate and review run, and the owner accepts it.  Afterwards a
-fresh clone of the target repository answers "which job produced this line?"
-from the commit trailer, and from the acceptance note once the owner fetches the
-notes ref.  A second run shows the lookup still names the run and attempt after
-the transcript file and the note are gone.
+Real fake-worker path: a job is dispatched by the scheduler, its worker leaves
+the edit for the engine to commit, the gate and review run, and the owner
+accepts it.  Afterwards a fresh clone of the target repository answers "which
+job produced this line?" from the commit trailer, and from the acceptance note
+once the owner fetches the notes ref.  A second run shows the lookup still names
+the run and attempt after the transcript file and the note are gone.
 """
 
 from __future__ import annotations
