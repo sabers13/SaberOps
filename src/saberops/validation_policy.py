@@ -54,7 +54,9 @@ WORKER_INSTRUCTIONS = (
     "   changing anything. Put a disagreement in your report for the planner; do\n"
     "   not start a rebuttal loop.\n"
     "6. End your final report with three lines: what you skipped, what you did not\n"
-    "   check, and the risks."
+    "   check, and the risks.\n"
+    "7. Add nothing without a caller: no unused function, parameter, option or\n"
+    "   alias; reuse the existing helper and name it in your report."
 )
 
 

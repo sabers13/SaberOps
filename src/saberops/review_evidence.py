@@ -23,6 +23,7 @@ import re
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
+from saberops.caller_evidence import render_caller_evidence
 from saberops.gate_scope import (
     GateScopeError,
     check_test_retirement,
@@ -257,7 +258,9 @@ def _retirement_evidence(
     return "\n".join(parts)
 
 
-def _diff_scan_evidence(worktree: Path, base_commit: str) -> str:
+def _diff_scan_evidence(
+    worktree: Path, base_commit: str, changed: tuple[str, ...]
+) -> str:
     added, removed = _diff_lines(worktree, base_commit)
     directives = scan_weakening_directives(added)
     suppressions = [
@@ -278,6 +281,8 @@ def _diff_scan_evidence(worktree: Path, base_commit: str) -> str:
         f"- deleted assertions: {len(deleted_assertions)}"
         + ("; " + _directive_evidence(deleted_assertions) if deleted_assertions else "")
     )
+    if any(path.startswith(("src/", "scripts/")) and path.endswith(".py") for path in changed):
+        parts.append(render_caller_evidence(worktree, base_commit))
     return "\n".join(parts)
 
 
@@ -349,7 +354,7 @@ def build_review_evidence(
             + "\n\n"
             + _retirement_evidence(worktree, base_commit, changed)
             + "\n\n"
-            + _diff_scan_evidence(worktree, base_commit)
+            + _diff_scan_evidence(worktree, base_commit, changed)
         )
 
     if gate_command:

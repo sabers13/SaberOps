@@ -321,6 +321,12 @@ Each finding is an object with these string fields:
   "code_location" (file:line, or null), "failure_scenario", "evidence",
   "minimum_correction", "repair_scope": "LOCAL_MECHANICAL" | "DESIGN_AFFECTING"
 B1, B2 and B3 block the candidate; D1 returns it for a decision; N1 never blocks.
+An addition with no production caller is a B1 unneeded addition: when the
+engine's caller search names one, cite the task's smallest-complete-change rule
+in "contract_reference", quote the engine result in "evidence", and name the
+existing alternative (helper, stdlib or dependency) in "minimum_correction".
+Use N1 instead when it is a thin wrapper, alias, test-only drill API or a
+documented serialization contract.
 Your VERDICT must agree: BLOCK (FINAL_BLOCK on a final review) when any
 B1/B2/B3/D1 finding exists.
 """

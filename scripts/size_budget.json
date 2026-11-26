@@ -1,5 +1,5 @@
 {
-  "logic_lines": 176936,
-  "suppression_comments": 354,
-  "reason": "H40b: stub vendor CLIs for tests that exercise the installed branch (ADR-0099)"
+  "logic_lines": 177541,
+  "suppression_comments": 355,
+  "reason": "H43: uncalled-definition caller evidence for the reviewer (ADR-0103)"
 }
