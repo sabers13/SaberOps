@@ -59,5 +59,8 @@ applied.
 - Mutation testing stays a periodic maintenance check, as the scout
   recommended: rerun it after a safety change or before a release and read the
   survivor list, instead of paying its runtime on every commit.
+- The recorded size budget (`scripts/size_budget.json`, ADR-0095) moves up with
+  the added tests and carries a one-line reason; the budget remains a measured
+  record, not a target.
 - `auto_accept.py` remains unmeasured for the acceptance path while the host is
   below the gate disk floor; this lane does not pretend otherwise.
