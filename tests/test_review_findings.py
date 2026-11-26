@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -29,7 +29,17 @@ from saberops.models import (
 )
 from saberops.orchestrator import Orchestrator
 from saberops.review import render_findings, structured_review_outcome
-from saberops.review_policy import FINDINGS_PROMPT
+from saberops.review_policy import (
+    FINDINGS_PROMPT,
+    ReviewPolicyVerdict,
+    ReviewProtocolError,
+    _parse_finding,
+    _unique_finding_id,
+    _unstructured_finding_note,
+    compute_disposition,
+    parse_review_findings,
+    validate_finding_evidence,
+)
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
@@ -273,3 +283,172 @@ def test_review_run_persists_structured_findings(
     assert review.verdict is ReviewVerdict.PASS
     stored = db.get_findings_for_review(review.id)
     assert [f.classification for f in stored] == ["N1"] and not stored[0].blocking
+
+
+# ---------------------------------------------------------------------------
+# Mutation-testing gaps (H46): boundary paths the kept suite did not exercise.
+# ---------------------------------------------------------------------------
+
+
+def _parsed(code: str, **overrides: Any) -> Any:
+    return _parse_finding(finding(code, **overrides), 0)
+
+
+def test_b1_blank_contract_reference_is_a_missing_citation() -> None:
+    """Covers: a whitespace B1 citation is refused, not accepted as a reference."""
+    parsed = _parsed("B1", contract_reference="   ")
+    assert validate_finding_evidence(parsed) == ["b1_contract_reference_missing"]
+
+
+def test_b2_every_blank_required_field_is_reported() -> None:
+    """Covers: the B2 empty-field loop checks each required field."""
+    parsed = _parsed(
+        "B2",
+        invariant_or_requirement=" ",
+        failure_scenario=" ",
+        evidence=" ",
+    )
+    assert validate_finding_evidence(parsed) == [
+        "b2_invariant_or_requirement_missing",
+        "b2_failure_scenario_missing",
+        "b2_evidence_missing",
+    ]
+
+
+def test_b2_concurrency_without_an_ordering_marker_is_vague() -> None:
+    """Covers: vague concurrency wording needs a concrete ordering marker."""
+    vague = _parsed(
+        "B2",
+        title="Handler may race under load",
+        failure_scenario="It might race under load",
+    )
+    assert "b2_vague_concurrency_scenario_without_concrete_interleaving" in (
+        validate_finding_evidence(vague)
+    )
+    concrete = _parsed(
+        "B2",
+        title="Handler may race under load",
+        failure_scenario="Thread A writes the row before thread B reads it",
+    )
+    assert validate_finding_evidence(concrete) == []
+
+
+def test_b3_evidence_must_name_the_missing_artifact() -> None:
+    """Covers: B3 evidence names the missing artifact; the check is not inverted."""
+    vague = _parsed(
+        "B3",
+        invariant_or_requirement="The run keeps a deploy log",
+        evidence="The PR says nothing about it",
+    )
+    assert validate_finding_evidence(vague) == [
+        "b3_evidence_must_name_required_missing_artifact"
+    ]
+    named = _parsed("B3", evidence="The deploy log is missing from the run")
+    assert validate_finding_evidence(named) == []
+
+
+def test_d1_must_name_the_unresolved_decision() -> None:
+    """Covers: D1 requires an unresolved-decision marker, and accepts one."""
+    undecided = _parsed("D1", invariant_or_requirement="Please look at this area")
+    assert validate_finding_evidence(undecided) == ["d1_must_name_unresolved_decision"]
+    decided = _parsed(
+        "D1", invariant_or_requirement="Unresolved decision: keep or retire the flag"
+    )
+    assert validate_finding_evidence(decided) == []
+
+
+def test_n1_evidence_must_explain_why_it_is_non_blocking() -> None:
+    """Covers: N1 evidence explains non-blocking rationale, and accepts one."""
+    vague = _parsed("N1", evidence="The name could be clearer")
+    assert validate_finding_evidence(vague) == [
+        "n1_evidence_must_explain_non_blocking_rationale"
+    ]
+    explained = _parsed("N1", evidence="Cosmetic and non-blocking; backlog it")
+    assert validate_finding_evidence(explained) == []
+
+
+@pytest.mark.parametrize("code", ["B1", "B2"])
+def test_final_round_blocks_b1_and_b2(code: str) -> None:
+    """Covers: a final-round B1/B2 finding maps BLOCK to FINAL_BLOCK."""
+    parsed = _parsed(code)
+    assert compute_disposition([parsed], is_final_round=False) is ReviewPolicyVerdict.BLOCK
+    assert (
+        compute_disposition([parsed], is_final_round=True)
+        is ReviewPolicyVerdict.FINAL_BLOCK
+    )
+
+
+def test_malformed_finding_does_not_drop_a_later_valid_finding() -> None:
+    """Covers: a skipped malformed finding does not stop the ingest loop."""
+    missing = finding("B1", title="Incomplete first")
+    del missing["repair_scope"]
+    parsed = parse_review_findings(
+        output("BLOCK", [missing, finding("B2", title="Valid second")])
+    )
+    assert [item.title for item in parsed.findings] == ["Valid second"]
+    assert len(parsed.unstructured) == 1
+    assert "Incomplete first" in parsed.unstructured[0]
+
+
+def test_last_json_findings_block_wins() -> None:
+    """Covers: only the last fenced json block is parsed."""
+    first = output("PASS", [finding("N1", title="First", evidence="minor and non-blocking")])
+    second = json.dumps(
+        {"findings": [finding("N1", title="Second", evidence="minor and non-blocking")]}
+    )
+    parsed = parse_review_findings(f"{first}\n```json\n{second}\n```\n")
+    assert [item.title for item in parsed.findings] == ["Second"]
+
+
+def test_parse_finding_requires_every_required_field() -> None:
+    """Covers: the required-field loop in the single-finding parser runs."""
+    item = finding("B2")
+    del item["evidence"]
+    with pytest.raises(ReviewProtocolError, match="missing required field: evidence"):
+        _parse_finding(item, 0)
+
+
+def test_parse_finding_rejects_empty_and_non_string_ids() -> None:
+    """Covers: an id must be a non-empty string, not just present."""
+    with pytest.raises(ReviewProtocolError, match="non-empty string"):
+        _parse_finding(finding("B2", id="   "), 0)
+    with pytest.raises(ReviewProtocolError, match="non-empty string"):
+        _parse_finding(finding("B2", id=cast("Any", 7)), 0)
+
+
+def test_parse_finding_rejects_unknown_or_non_string_severity() -> None:
+    """Covers: severity must be a known string, not just present."""
+    with pytest.raises(ReviewProtocolError, match="invalid severity"):
+        _parse_finding(finding("B2", severity="urgent"), 0)
+    with pytest.raises(ReviewProtocolError, match="invalid severity"):
+        _parse_finding(finding("B2", severity=cast("Any", 3)), 0)
+
+
+def test_duplicate_id_renumbering_advances_past_an_existing_suffix() -> None:
+    """Covers: a free suffix is chosen by advancing, not by a fixed guess."""
+    assert _unique_finding_id("F1", {"F1-2"}) == "F1-3"
+
+
+def test_unstructured_note_keeps_unicode_readable_and_sorts_keys() -> None:
+    """Covers: the note keeps raw unicode and sorts keys deterministically."""
+    note = _unstructured_finding_note({"b": "café", "a": 1}, 0, "wrong shape")
+    assert '"b": "café"' in note
+    assert note.index('"a"') < note.index('"b"')
+
+
+def test_unstructured_note_falls_back_to_repr_for_unserialisable_items() -> None:
+    """Covers: a value json cannot encode is rendered with repr, not raised."""
+
+    class Strange:
+        def __repr__(self) -> str:
+            return "<strange>"
+
+    note = _unstructured_finding_note(Strange(), 0, "wrong type")
+    assert "<strange>" in note
+
+
+def test_findings_block_must_be_an_object_with_a_findings_list() -> None:
+    """Covers: a list or a missing findings key is a protocol error."""
+    for body in ("[]", '{"summary": "no findings key"}'):
+        with pytest.raises(ReviewProtocolError, match="object with a 'findings' list"):
+            parse_review_findings(f"```json\n{body}\n```\n")

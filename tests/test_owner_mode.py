@@ -49,8 +49,18 @@ from saberops.owner_mode import (
     ModePermissions,
     OwnerMode,
     OwnerModeError,
+    OwnerModeSettings,
+    QuestionDisposition,
+    _parse_host_access,
+    _parse_max_jobs,
+    _parse_permissions,
+    _parse_until,
+    _read_legacy_authority,
+    _validate_document,
+    _validate_mode_fields,
     clear_owner_mode,
     decide_owner_action,
+    decide_question_answer,
     effective_owner_mode,
     load_effective_owner_mode,
     load_owner_mode_settings,
@@ -62,6 +72,13 @@ from saberops.owner_mode import (
     set_owner_mode,
 )
 from saberops.paths import get_owner_mode_path, owner_state_dir
+from saberops.questions import (
+    AskRole,
+    DecisionClass,
+    Escalation,
+    OwnerQuestion,
+    QuestionRequest,
+)
 
 pytestmark = pytest.mark.packaged_routing_default
 
@@ -669,3 +686,215 @@ def test_mcp_reads_mode_and_cannot_change_it(isolated: Path, tmp_path: Path) -> 
 
     after = _payload(server, "get_mode", {})
     assert after["mode"] == "ask-me"
+
+
+# ---------------------------------------------------------------------------
+# Mutation-testing gaps (H46): parser boundaries, fail-closed shapes, reasons.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_max_jobs_refuses_a_bool_and_zero() -> None:
+    """Covers: True is not a job budget and zero is not a budget."""
+    with pytest.raises(OwnerModeError, match="positive integer"):
+        _parse_max_jobs(True)
+    with pytest.raises(OwnerModeError, match="positive integer"):
+        _parse_max_jobs(0)
+    assert _parse_max_jobs(1) == 1
+    assert _parse_max_jobs(None) is None
+
+
+def test_parse_permissions_reports_unknown_and_missing_fields() -> None:
+    """Covers: the permission set algebra keeps unknown and missing distinct."""
+    with pytest.raises(OwnerModeError, match="unknown permission fields"):
+        _parse_permissions({"extra": True}, "test")
+    with pytest.raises(OwnerModeError, match="missing permission fields"):
+        _parse_permissions({}, "test")
+
+
+def test_parse_until_and_host_access_raise_owner_mode_errors() -> None:
+    """Covers: malformed values fail as OwnerModeError, never a raw exception."""
+    with pytest.raises(OwnerModeError, match="ISO-8601"):
+        _parse_until("not-a-date")
+    with pytest.raises(OwnerModeError, match="ISO-8601 string"):
+        _parse_until(7)
+    with pytest.raises(OwnerModeError, match="Unknown host_access"):
+        _parse_host_access("root")
+    with pytest.raises(OwnerModeError, match="must be a string"):
+        _parse_host_access(7)
+
+
+def test_mode_fields_outside_away_are_refused() -> None:
+    """Covers: away-only until/max_jobs never load under another mode."""
+    with pytest.raises(OwnerModeError, match="only valid with away"):
+        _validate_mode_fields({"mode": "critical-only", "until": "2999-01-01T00:00:00Z"}, "t")
+    with pytest.raises(OwnerModeError, match="only valid with away"):
+        _validate_mode_fields({"mode": "ask-me", "max_jobs": 2}, "t")
+
+
+def test_document_version_must_be_the_exact_integer() -> None:
+    """Covers: a wrong integer version fails closed (not only a wrong type)."""
+    with pytest.raises(OwnerModeError, match="version must be integer 2"):
+        _validate_document({"version": 3, "mode": "ask-me"}, "t")
+    with pytest.raises(OwnerModeError, match="version must be integer 2"):
+        _validate_document({"version": "2", "mode": "ask-me"}, "t")
+
+
+def _legacy_authority(isolated: Path, payload: object) -> Path:
+    config = isolated / "config" / "saberops"
+    config.mkdir(parents=True, exist_ok=True)
+    path = config / "authority.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_legacy_authority_wrong_version_type_fails_closed(isolated: Path) -> None:
+    """Covers: a string version is a corrupt legacy document."""
+    _legacy_authority(isolated, {"version": "1", "mode": "supervised"})
+    with pytest.raises(OwnerModeError, match="version must be integer 1"):
+        _read_legacy_authority()
+
+
+def test_legacy_authority_wrong_versions_and_shapes_fail_closed(isolated: Path) -> None:
+    """Covers: wrong version, top-level shape and unknown keys all fail closed."""
+    _legacy_authority(isolated, {"version": 9, "mode": "supervised"})
+    with pytest.raises(OwnerModeError, match="version must be integer 1"):
+        _read_legacy_authority()
+    _legacy_authority(isolated, [{"version": 1}])
+    with pytest.raises(OwnerModeError, match="top-level must be a JSON object"):
+        _read_legacy_authority()
+    _legacy_authority(isolated, {"version": 1, "mode": "supervised", "extra": 1})
+    with pytest.raises(OwnerModeError, match="unknown keys"):
+        _read_legacy_authority()
+
+
+def test_legacy_authority_read_and_json_errors_fail_closed(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: an unreadable file and invalid JSON are OwnerModeErrors."""
+    path = _legacy_authority(isolated, {"version": 1, "mode": "supervised"})
+    original = Path.read_text
+
+    def boom(self: Path, *args: Any, **kwargs: Any) -> str:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with pytest.raises(OwnerModeError, match="cannot read"):
+        _read_legacy_authority()
+    monkeypatch.setattr(Path, "read_text", original)
+
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(OwnerModeError, match="invalid JSON"):
+        _read_legacy_authority()
+
+
+def _settings(**overrides: Any) -> OwnerModeSettings:
+    fields: dict[str, Any] = {
+        "mode": OwnerMode.ASK_ME,
+        "until": None,
+        "set_at": None,
+        "set_by": None,
+        "source": "owner",
+        "source_path": None,
+    }
+    fields.update(overrides)
+    return OwnerModeSettings(**fields)
+
+
+def test_dispatch_reason_reports_the_real_ceiling() -> None:
+    """Covers: the dispatch reason prints the decision, not its inverse."""
+    decision = decide_owner_action(ModeAction.DISPATCH, mode_settings=_settings())
+    assert decision.allowed is True
+    assert "auto_start=true" in decision.reason
+
+
+def test_expired_away_reason_says_the_grant_ended() -> None:
+    """Covers: an expired away grant explains itself in the decision reason."""
+    settings = _settings(mode=OwnerMode.AWAY, until="2026-01-01T00:00:00Z")
+    decision = decide_owner_action(
+        ModeAction.RETRY, mode_settings=settings, now=datetime(2026, 6, 1, tzinfo=UTC)
+    )
+    assert decision.expired is True
+    assert decision.mode is OwnerMode.ASK_ME
+    assert "away ended at 2026-01-01T00:00:00Z; ask-me applies." in decision.reason
+
+
+def _question(decision_class: DecisionClass = DecisionClass.FIX_UP_CONTENT) -> OwnerQuestion:
+    return OwnerQuestion(
+        request=QuestionRequest(
+            key="fixup",
+            subject="May the fixup land?",
+            kind="owner-decision",
+            decision_class=decision_class,
+            raised_by_role=AskRole.PLAN,
+            raised_by="planner",
+            escalation=Escalation(
+                requirement="the owner's answer is required",
+                proposed_expansion="do the wider thing",
+                smallest_compliant="do the narrow thing",
+                consequences="work stays parked",
+                recommendation="do the narrow thing",
+            ),
+        ),
+        raised_at="2026-01-01T00:00:00+00:00",
+    )
+
+
+def test_question_answer_reasons_are_the_contract() -> None:
+    """Covers: critical, ask-me, no-planner and allowed branches and reasons."""
+    critical = decide_question_answer(
+        _question(DecisionClass.PUSH),
+        planner_present=True,
+        mode_settings=_settings(mode=OwnerMode.AWAY, until="2999-01-01T00:00:00Z"),
+    )
+    assert critical.disposition is QuestionDisposition.ASK_OWNER
+    assert "the question is critical" in critical.reason
+
+    ask_me = decide_question_answer(
+        _question(), planner_present=True, mode_settings=_settings()
+    )
+    assert ask_me.disposition is QuestionDisposition.ASK_OWNER
+    assert "ask-me leaves every question to the owner." in ask_me.reason
+
+    no_planner = decide_question_answer(
+        _question(),
+        planner_present=False,
+        mode_settings=_settings(mode=OwnerMode.CRITICAL_ONLY),
+    )
+    assert no_planner.disposition is QuestionDisposition.WAIT_FOR_PLANNER
+    assert "no background planner runs" in no_planner.reason
+
+    allowed = decide_question_answer(
+        _question(),
+        planner_present=True,
+        mode_settings=_settings(mode=OwnerMode.CRITICAL_ONLY),
+    )
+    assert allowed.disposition is QuestionDisposition.PLANNER_MAY_ANSWER
+    assert "critical-only lets the live planning session answer" in allowed.reason
+
+
+def test_expired_away_question_answer_becomes_ask_me() -> None:
+    """Covers: an expired away grant leaves questions to the owner with a note."""
+    decision = decide_question_answer(
+        _question(),
+        planner_present=True,
+        mode_settings=_settings(mode=OwnerMode.AWAY, until="2026-01-01T00:00:00Z"),
+        now=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    assert decision.disposition is QuestionDisposition.ASK_OWNER
+    assert decision.expired is True
+    assert "away ended at 2026-01-01T00:00:00Z; ask-me applies." in decision.reason
+
+
+def test_document_version_below_the_expected_one_fails_closed() -> None:
+    """Covers: an older integer version is refused, not only a newer one."""
+    with pytest.raises(OwnerModeError, match="version must be integer 2"):
+        _validate_document({"version": 1, "mode": "ask-me"}, "t")
+
+
+def test_non_dispatch_reason_reports_the_real_ceiling() -> None:
+    """Covers: the permitted-action reason prints the decision, not its inverse."""
+    decision = decide_owner_action(
+        ModeAction.RETRY, mode_settings=_settings(mode=OwnerMode.CRITICAL_ONLY)
+    )
+    assert decision.allowed is True
+    assert "auto_retry=true" in decision.reason

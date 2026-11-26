@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 from collections.abc import MutableMapping
+from datetime import datetime
 from typing import Any, cast
 
 import pytest
@@ -28,6 +29,8 @@ from saberops.away import (
     AuthorityMode,
     AutonomyClass,
     AwayError,
+    AwayJournal,
+    AwayPolicy,
     CandidateAcceptance,
     Decision,
     DecisionDisposition,
@@ -48,6 +51,7 @@ from saberops.away import (
     StallObservation,
     StallSupervisionError,
     StandingDecision,
+    _preflight_for,
     build_morning_report,
     compute_plan_impact,
     detect_stall,
@@ -1169,3 +1173,169 @@ def test_one_away_module_holds_the_policy_and_its_store() -> None:
         "destructive_operations",
         "publishing",
     )
+
+
+# --------------------------------------------------------------------------
+# Mutation-testing gaps (H46): preflight accounting and dataclass boundaries.
+# --------------------------------------------------------------------------
+
+
+def _policy_for(set_at: str, *, budget: int = 2, wall_clock: int = 100) -> AwayPolicy:
+    return AwayPolicy(
+        budget_units=budget,
+        wall_clock_seconds=wall_clock,
+        worker_cap=5,
+        paths=("src",),
+        set_at=set_at,
+        set_by="owner",
+    )
+
+
+def _preflight_result(policy: AwayPolicy | None, journal: AwayJournal, now: str) -> PreflightResult:
+    return _preflight_for(
+        policy=policy,
+        sheet=DecisionSheet(run_id="run-7", plan_reference="plan-1"),
+        run_id="run-7",
+        active_workers=0,
+        journal=journal,
+        now=datetime.fromisoformat(now),
+    )
+
+
+def test_preflight_without_a_policy_refuses_every_unset_limit(tmp_path: Any) -> None:
+    """Covers: no policy means each limit is unset, never a safe-looking default."""
+    result = _preflight_result(
+        None, AwayJournal(tmp_path / "journal.jsonl"), "2026-10-18T06:00:00+00:00"
+    )
+    assert result.ready is False
+    assert {
+        PreflightBlockerCode.BUDGET_NOT_SET,
+        PreflightBlockerCode.WALL_CLOCK_NOT_SET,
+        PreflightBlockerCode.NO_AUTHORIZED_SCOPE,
+        PreflightBlockerCode.NO_STALL_CHANNEL,
+        PreflightBlockerCode.WORKER_CAP_NOT_SET,
+    } <= {blocker.code for blocker in result.blockers}
+
+
+def test_preflight_counts_only_resolutions_since_the_policy_was_set(tmp_path: Any) -> None:
+    """Covers: mixed kinds, before/at/after timestamps and the exact boundary.
+
+    The counts are deliberately asymmetric (one before, two at, three after)
+    so an inverted or shifted comparison cannot land on the same total.
+    """
+    set_at = "2026-10-18T06:00:00+00:00"
+    journal = AwayJournal(tmp_path / "journal.jsonl")
+    journal.append({"kind": "notification", "recorded_at": set_at})
+    journal.append({"kind": "task_outcome", "recorded_at": set_at})
+    journal.append({"kind": "resolution", "recorded_at": "2026-10-18T05:59:59+00:00"})
+    journal.append({"kind": "resolution", "recorded_at": set_at})
+    journal.append({"kind": "resolution", "recorded_at": set_at})
+    for offset in (1, 2, 3):
+        journal.append(
+            {"kind": "resolution", "recorded_at": f"2026-10-18T06:00:0{offset}+00:00"}
+        )
+    result = _preflight_result(
+        _policy_for(set_at, budget=5), journal, "2026-10-18T06:00:30+00:00"
+    )
+    assert result.ready is True
+    assert any(
+        "budget is at or above 80% consumed (5/5 units)" in warning
+        for warning in result.warnings
+    )
+
+
+def test_preflight_derives_wall_clock_elapsed_from_set_at(tmp_path: Any) -> None:
+    """Covers: elapsed seconds are now minus set_at, not a different operation."""
+    set_at = "2026-10-18T05:58:30+00:00"
+    result = _preflight_result(
+        _policy_for(set_at, budget=100),
+        AwayJournal(tmp_path / "journal.jsonl"),
+        "2026-10-18T06:00:00+00:00",
+    )
+    assert any(
+        "wall-clock is at or above 80% consumed (90/100s)" in warning
+        for warning in result.warnings
+    )
+
+
+def test_stall_scope_limit_is_the_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Covers: exactly MAX_SCOPES is allowed; one more is refused."""
+    monkeypatch.setattr("saberops.away.MAX_SCOPES", 1)
+    one = _observation(stalled_scopes=(_scope(),))
+    assert one.stalled_scopes == (_scope(),)
+    with pytest.raises(AwayError, match="hard limit"):
+        _observation(
+            stalled_scopes=(_scope(), _scope(task="task-2"))
+        )
+
+
+def test_stall_scopes_must_be_a_sequence_not_a_string() -> None:
+    """Covers: a bare string is refused for what it is, before element checks."""
+    with pytest.raises(AwayError, match="ordered sequence"):
+        _observation(stalled_scopes=cast("Any", "src/a.py"))
+
+
+def test_alarm_message_truncates_past_the_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Covers: a message longer than the bound is cut, not passed through."""
+    monkeypatch.setattr("saberops.away.MAX_ALARM_MESSAGE_LENGTH", 20)
+    alarm = detect_stall(_observation(now="2026-10-18T09:00:00+00:00"))
+    assert alarm is not None
+    assert len(alarm.message) == 20
+
+
+def test_idle_at_exactly_the_critical_multiple_is_critical() -> None:
+    """Covers: the critical bound is the multiplier, inclusive at its value."""
+    at_bound = detect_stall(
+        _observation(
+            now="2026-10-18T06:20:00+00:00",
+            stall_threshold_seconds=600,
+        )
+    )
+    assert at_bound is not None
+    assert at_bound.idle_seconds == STALL_CRITICAL_MULTIPLIER * 600
+    assert at_bound.severity is AlarmSeverity.CRITICAL
+
+    just_after_threshold = detect_stall(
+        _observation(now="2026-10-18T06:11:41+00:00", stall_threshold_seconds=600)
+    )
+    assert just_after_threshold is not None
+    assert just_after_threshold.idle_seconds == 701
+    assert just_after_threshold.severity is AlarmSeverity.ALARM
+
+    just_past_the_multiple = detect_stall(
+        _observation(now="2026-10-18T06:20:01+00:00", stall_threshold_seconds=600)
+    )
+    assert just_past_the_multiple is not None
+    assert just_past_the_multiple.severity is AlarmSeverity.CRITICAL
+
+
+def test_plan_task_limit_is_the_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Covers: exactly MAX_TASKS dependencies are allowed; one more refused."""
+    monkeypatch.setattr("saberops.away.MAX_TASKS", 1)
+    task = PlanTaskState(scope=_scope(), depends_on=(_scope(task="task-2"),))
+    assert task.depends_on == (_scope(task="task-2"),)
+    with pytest.raises(AwayError, match="too many dependencies"):
+        PlanTaskState(
+            scope=_scope(),
+            depends_on=(_scope(task="task-2"), _scope(task="task-3")),
+        )
+
+
+def test_plan_task_dependencies_must_be_an_ordered_sequence() -> None:
+    """Covers: a string or a non-sequence is refused as a shape error."""
+    with pytest.raises(AwayError, match="ordered sequence"):
+        PlanTaskState(scope=_scope(), depends_on=cast("Any", "src/a.py"))
+    with pytest.raises(AwayError, match="ordered sequence"):
+        PlanTaskState(scope=_scope(), depends_on=cast("Any", 7))
+
+
+def test_acceptance_facts_must_be_real_booleans() -> None:
+    """Covers: every acceptance fact is validated, not just stored."""
+    with pytest.raises(AwayError):
+        _acceptance(gate_passed=1)
+
+
+def test_only_the_owner_may_author_a_standing_decision_even_past_the_alphabet() -> None:
+    """Covers: answered_by is compared for equality, not lexical order."""
+    with pytest.raises(DecisionSheetError, match="only the owner"):
+        _standing(answered_by="zowner")

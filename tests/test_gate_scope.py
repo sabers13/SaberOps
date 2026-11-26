@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from saberops.gate_scope import (
@@ -19,6 +21,7 @@ from saberops.gate_scope import (
     collect_tests_from_sources,
     definition_digest,
     gate_definition_mismatches,
+    git_changed_files,
     is_protected_gate_path,
     normalize_path,
     parse_retirement_table,
@@ -258,3 +261,58 @@ def test_definition_digest_is_stable_and_content_sensitive() -> None:
     """Covers: GT-1 (recorded evidence digests identify one definition version)."""
     assert definition_digest("x") == definition_digest("x")
     assert definition_digest("x") != definition_digest("y")
+
+
+# ---------------------------------------------------------------------------
+# Mutation-testing gaps (H46): failure paths and order-sensitive comparisons.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_tests_reports_invalid_test_source() -> None:
+    """Covers: an unparsable test source is a GateScopeError, not a crash."""
+    with pytest.raises(GateScopeError, match="cannot parse test source"):
+        collect_tests("def test_broken(:\n    pass\n", "tests/test_broken.py")
+
+
+def test_git_changed_files_reports_a_failed_git_diff(tmp_path: Path) -> None:
+    """Covers: a failing git diff becomes a GateScopeError."""
+    with pytest.raises(GateScopeError, match="git diff"):
+        git_changed_files(str(tmp_path), "no-such-ref", "HEAD")
+
+
+def test_changed_gate_config_sections_reports_a_one_sided_section() -> None:
+    """Covers: a gate section present on only one side is a change."""
+    base = "[tool.mypy]\nstrict = true\n"
+    head = "[tool.mypy]\nstrict = true\n\n[tool.ruff]\nline-length = 100\n"
+    assert changed_gate_config_sections(base, head) == ("tool.ruff",)
+
+
+def test_retirement_blocks_a_rewrite_even_when_the_head_sorts_first() -> None:
+    """Covers: rewritten bodies compare for inequality, not sort order."""
+    base = {"tests/test_mod.py": "def test_a():\n    assert goal_z\n"}
+    head = {"tests/test_mod.py": "def test_a():\n    assert goal_a\n"}
+    result = check_test_retirement(base, head)
+    assert result.allowed is False
+    assert result.rewritten == ("tests/test_mod.py::test_a",)
+
+
+def test_normalize_path_accepts_a_legal_component_before_dotdot() -> None:
+    """Covers: only the exact '..' component escapes, not any earlier value."""
+    assert normalize_path("src/!notes.py") == "src/!notes.py"
+
+
+def test_normalize_path_rejects_a_drive_prefix_but_allows_an_inner_colon() -> None:
+    """Covers: a colon in the first component is absolute; later ones are legal."""
+    with pytest.raises(GateScopeError):
+        normalize_path("C:/repo/file.py")
+    assert normalize_path("src/a:b.py") == "src/a:b.py"
+
+
+def test_retirement_leaves_unchanged_sources_alone() -> None:
+    """Covers: equal bodies read from separate sources are not a rewrite."""
+    source = "def test_a():\n    assert goal\n"
+    result = check_test_retirement(
+        {"tests/test_mod.py": source}, {"tests/test_mod.py": source}
+    )
+    assert result.allowed is True
+    assert result.rewritten == ()

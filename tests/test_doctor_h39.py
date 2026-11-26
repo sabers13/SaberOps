@@ -617,3 +617,77 @@ def test_doctor_fix_applies_safe_repairs_away(
 
     assert saberops_state_dir().is_dir()
     assert not [item for item in payload["findings"] if item["state"] == "fixable"]
+
+
+# --------------------------------------------------------------------------- #
+# Mutation-testing gaps (H46): one fix drill, filters and action logging
+# --------------------------------------------------------------------------- #
+
+
+def _finding(check_id: str, status: str = "fixable") -> doctor.DoctorFinding:
+    return doctor.DoctorFinding(
+        severity="FAIL", message=f"{check_id} is broken", check_id=check_id, status=status
+    )
+
+
+def test_fix_drill_records_every_repair_and_a_raising_one(
+    scratch_home: Path, tmp_path: Path, db_path: Path
+) -> None:
+    """Covers: two findings, one raising repair, both recorded and logged."""
+    findings = [_finding("alpha"), _finding("beta")]
+
+    def repair_alpha(_: doctor.RepairContext) -> doctor.RepairOutcome:
+        return doctor.RepairOutcome(applied=True, detail="fixed")
+
+    def repair_beta(_: doctor.RepairContext) -> doctor.RepairOutcome:
+        raise RuntimeError("boom")
+
+    report = doctor.run_doctor(
+        tmp_path,
+        db_path,
+        fix=True,
+        checks=lambda: findings,
+        repairs={"alpha": repair_alpha, "beta": repair_beta},
+    )
+    assert report.fix_requested is True
+    assert [action.check_id for action in report.actions] == ["alpha", "beta"]
+    assert _repair(report, "alpha").applied is True
+    beta = _repair(report, "beta")
+    assert beta.applied is False
+    assert "repair raised: boom" in beta.detail
+    log = doctor._action_log_path().read_text(encoding="utf-8").splitlines()
+    assert len(log) == 2
+
+
+def test_plain_run_does_not_request_fixes(
+    scratch_home: Path, tmp_path: Path, db_path: Path
+) -> None:
+    """Covers: a read-only run reports fix_requested=False and no actions."""
+    report = doctor.run_doctor(tmp_path, db_path, checks=lambda: [_finding("alpha")])
+    assert report.fix_requested is False
+    assert report.actions == ()
+
+
+def test_fix_skips_non_fixable_duplicate_and_unmapped_check_ids(
+    scratch_home: Path, tmp_path: Path, db_path: Path
+) -> None:
+    """Covers: the fix loop filters, deduplicates and continues past a skip."""
+    findings = [
+        _finding("alpha"),
+        _finding("alpha"),
+        _finding("unmapped"),
+        _finding("human", status="human"),
+        _finding("beta"),
+    ]
+
+    def applied(_: doctor.RepairContext) -> doctor.RepairOutcome:
+        return doctor.RepairOutcome(applied=True, detail="fixed")
+
+    report = doctor.run_doctor(
+        tmp_path,
+        db_path,
+        fix=True,
+        checks=lambda: findings,
+        repairs={"alpha": applied, "human": applied, "beta": applied},
+    )
+    assert [action.check_id for action in report.actions] == ["alpha", "beta"]

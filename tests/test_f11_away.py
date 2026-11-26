@@ -809,3 +809,63 @@ def test_return_summary_lists_candidates_awaiting_acceptance(
     assert entry["owner_action"] == f"orch accept {job.current_run_id}"
     assert "1 candidate(s) awaiting acceptance" in summary.one_line()
     assert summary.as_dict()["awaiting_acceptance"][0]["run_id"] == job.current_run_id
+
+
+def test_dispatch_turn_counts_only_resolution_records(
+    owner_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: the turn counter counts resolution records, not every record."""
+    queue = OwnerQuestionQueue()
+    _ask(queue, key="fixup", decision_class=DecisionClass.FIX_UP_CONTENT, blocks=("job_a",))
+    journal = away.AwayJournal()
+    journal.append({"kind": "preflight", "run_id": "job_a"})
+    journal.append({"kind": "resolution", "run_id": "job_a"})
+    journal.append({"kind": "task_outcome", "run_id": "job_a"})
+    journal.append({"kind": "wall_clock", "run_id": "job_a"})
+    captured: dict[str, int | None] = {}
+    real = away.resolve_decision
+
+    def spy(sheet: Any, decision: Any, **kwargs: Any) -> Any:
+        captured["turn"] = kwargs.get("current_turn")
+        return real(sheet, decision, **kwargs)
+
+    monkeypatch.setattr(away, "resolve_decision", spy)
+    gate = away.evaluate_dispatch(
+        job_id="job_a",
+        repo="/work/repo",
+        now=_NOW,
+        policy=_policy(),
+        journal=journal,
+        queue=queue,
+    )
+    assert gate.allowed is False
+    assert captured["turn"] == 1
+
+
+def test_an_answered_question_does_not_stop_a_later_blocking_one(
+    owner_env: dict[str, Path],
+) -> None:
+    """Covers: after applying a standing decision, the next question is examined."""
+    decision_store = away.StandingDecisionStore()
+    project = away.project_scope_id("/work/repo")
+    decision_store.add(
+        StandingDecision(
+            standing_decision_id="sd-live",
+            scope=DecisionScope(project_id=project, task_id="job_a"),
+            decision_key=away.decision_key_for_question("fixup"),
+            owner_words="Use option two, exactly as written.",
+            answered_by="owner",
+            expires_at=_FUTURE,
+        )
+    )
+    queue = OwnerQuestionQueue()
+    _ask(queue, key="other", decision_class=DecisionClass.FIX_UP_CONTENT, blocks=("job_b",))
+    _ask(queue, key="fixup", decision_class=DecisionClass.FIX_UP_CONTENT, blocks=("job_a",))
+    _ask(queue, key="later", decision_class=DecisionClass.FIX_UP_CONTENT, blocks=("job_a",))
+    gate = away.evaluate_dispatch(
+        job_id="job_a", repo="/work/repo", now=_NOW, policy=_policy()
+    )
+    assert gate.allowed is False
+    assert gate.code == "escalated"
+    statuses = [question.status for question in queue.questions()]
+    assert statuses == [QuestionStatus.OPEN, QuestionStatus.ANSWERED, QuestionStatus.OPEN]
