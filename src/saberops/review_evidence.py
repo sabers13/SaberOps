@@ -27,6 +27,7 @@ from saberops.gate_scope import (
     GateScopeError,
     check_test_retirement,
     check_write_scope,
+    scan_weakening_directives,
 )
 from saberops.git import GitManager
 from saberops.process import run_process
@@ -130,17 +131,8 @@ def _search_evidence(worktree: Path, term: str) -> str:
     return f"{command}\nexit {result.exit_code}\n{_bounded(result.stderr, _SEARCH_CHARS)}"
 
 
-_SUPPRESSION_RE = re.compile(
-    r"#\s*(?:noqa|type:\s*ignore|pylint:\s*disable|ruff:\s*noqa|"
-    r"pyright:\s*ignore|mypy:|eslint-disable)",
-    re.IGNORECASE,
-)
 _CATCH_ALL_RE = re.compile(r"except\s*(?:\(\s*)?(?:BaseException|Exception)\b|except\s*:")
-_SKIP_MARKER_RE = re.compile(
-    r"pytest\.mark\.(?:skip|skipif|xfail)|pytest\.skip\(|unittest\.skip|"
-    r"@skip\b|skipIf|expectedFailure",
-    re.IGNORECASE,
-)
+_REMOVED_ASSERT_RE = re.compile(r"^\s*assert\b")
 
 
 def _is_test_path(path: str) -> bool:
@@ -152,25 +144,30 @@ def _is_test_path(path: str) -> bool:
     )
 
 
-def _added_lines(
+def _diff_lines(
     worktree: Path, base_commit: str, paths: Sequence[str] = ()
-) -> dict[str, list[str]]:
-    """Added lines per changed path from the committed candidate diff."""
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Added and removed lines per changed path from the candidate diff."""
     command = ["git", "diff", "--unified=0", f"{base_commit}..HEAD"]
     if paths:
         command.extend(["--", *paths])
     result = run_process(command, cwd=worktree, timeout=30.0)
     if not result.passed:
-        return {}
+        return {}, {}
     added: dict[str, list[str]] = {}
+    removed: dict[str, list[str]] = {}
     current = ""
     for line in result.stdout.splitlines():
-        if line.startswith("+++ b/"):
-            current = line[6:]
+        if line.startswith("+++ "):
+            current = line[6:] if line.startswith("+++ b/") else ""
             continue
-        if current and line.startswith("+") and not line.startswith("+++"):
+        if not current:
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
             added.setdefault(current, []).append(line[1:])
-    return added
+        elif line.startswith("-") and not line.startswith("---"):
+            removed.setdefault(current, []).append(line[1:])
+    return added, removed
 
 
 def _source_at(worktree: Path, revision: str, path: str) -> str | None:
@@ -180,18 +177,24 @@ def _source_at(worktree: Path, revision: str, path: str) -> str | None:
     return result.stdout if result.passed else None
 
 
-def _matching_added_lines(
-    added: dict[str, list[str]], pattern: re.Pattern[str], paths: Sequence[str] = ()
+def _matching_lines(
+    lines_by_path: dict[str, list[str]],
+    pattern: re.Pattern[str],
+    paths: Sequence[str] = (),
 ) -> list[str]:
     wanted = set(paths)
     matches: list[str] = []
-    for path, lines in added.items():
+    for path, lines in lines_by_path.items():
         if wanted and path not in wanted:
             continue
         for line in lines:
             if pattern.search(line):
                 matches.append(f"{path}: {line.strip()}")
     return matches
+
+
+def _directive_evidence(lines: list[str]) -> str:
+    return "; ".join(lines[:20])
 
 
 def _scope_evidence(
@@ -246,25 +249,34 @@ def _retirement_evidence(
         )
     if not retirement.removed and not retirement.rewritten:
         parts.append("- no test was deleted or rewritten")
-    added = _added_lines(worktree, base_commit, test_paths)
-    skips = _matching_added_lines(added, _SKIP_MARKER_RE)
+    added, _removed = _diff_lines(worktree, base_commit, test_paths)
+    directives = scan_weakening_directives(added)
+    skips = [item.as_text() for item in directives if item.kind == "skip"]
     if skips:
-        parts.append("- new skip/xfail markers: " + "; ".join(skips[:20]))
+        parts.append("- new skip/xfail markers: " + _directive_evidence(skips))
     return "\n".join(parts)
 
 
 def _diff_scan_evidence(worktree: Path, base_commit: str) -> str:
-    added = _added_lines(worktree, base_commit)
-    suppressions = _matching_added_lines(added, _SUPPRESSION_RE)
-    catch_alls = _matching_added_lines(added, _CATCH_ALL_RE)
+    added, removed = _diff_lines(worktree, base_commit)
+    directives = scan_weakening_directives(added)
+    suppressions = [
+        item.as_text() for item in directives if item.kind != "skip"
+    ]
+    catch_alls = _matching_lines(added, _CATCH_ALL_RE)
+    deleted_assertions = _matching_lines(removed, _REMOVED_ASSERT_RE)
     parts = ["Added-line scan (evidence only; the reviewer decides):"]
     parts.append(
         "- new suppression comments: "
-        + ("; ".join(suppressions[:20]) if suppressions else "none")
+        + (_directive_evidence(suppressions) if suppressions else "none")
     )
     parts.append(
         "- new catch-all exception handlers: "
-        + ("; ".join(catch_alls[:20]) if catch_alls else "none")
+        + (_directive_evidence(catch_alls) if catch_alls else "none")
+    )
+    parts.append(
+        f"- deleted assertions: {len(deleted_assertions)}"
+        + ("; " + _directive_evidence(deleted_assertions) if deleted_assertions else "")
     )
     return "\n".join(parts)
 

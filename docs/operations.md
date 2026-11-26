@@ -696,14 +696,17 @@ execute the configured gate:
   durable receipt.
 
 - **Gate-definition protection** (`saberops.gate_scope`) runs before both
-  paths. The candidate's gate scripts, every `conftest.py`, `pyproject.toml`
-  and the CI workflow are compared byte-for-byte with the recorded base; a
-  changed definition never runs and becomes an owner question. A successful
-  acceptance receipt records the verdict under `gate_protection`.
+  paths. The candidate's gate scripts, every `conftest.py`, `pyproject.toml`,
+  every config file that overrides it for pytest/ruff/mypy/tox, every workflow
+  under `.github/workflows/` and every added suppression or skip directive are
+  compared with (or scanned from) the recorded base; a changed definition or
+  added directive never runs and becomes an owner question that lists each one.
+  A successful acceptance receipt records the verdict under `gate_protection`.
 - **Write scope and test retirement** are engine evidence for the independent
   reviewer through `build_review_evidence`, not gate blocks: an ordinary fix
   may edit tests, and the reviewer sees deleted tests, rewritten bodies, new
-  skip markers, new suppression comments and new catch-all handlers.
+  skip markers, new suppression comments, new catch-all handlers and deleted
+  assertions.
 - **Disk admission** enforces the shared free-space floor; acceptance also
   honours the frozen gate-scratch mode.
 - **Evidence** is written to the run's evidence directory. Model-run commands

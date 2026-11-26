@@ -113,33 +113,47 @@ The protected definitions are:
 | --- | --- |
 | Gate scripts / tooling | everything under `scripts/` (the named set: `gate-full.sh`, `gate-ui-fast.sh`, `gate-affected.sh`, `gate_tools.py`, `build_test_map.py`, `select_tests.py`, `test_hygiene.py`, `size_budget.py` and `size_budget.json`, plus the G1 runner `lane-check.sh`, `gate_lib.sh` and any future gate helper) |
 | Test infrastructure | every `conftest.py`, at the repository root, in `tests/` and in any subdirectory |
-| Gate configuration | `pyproject.toml` (`[tool.pytest.ini_options]`, `[tool.ruff]`, `[tool.mypy]`; the whole file is protected because the dev-dependency pins choose the tools the gate runs) and `.github/workflows/ci.yml` |
+| Gate configuration | `pyproject.toml` (`[tool.pytest.ini_options]`, `[tool.ruff]`, `[tool.mypy]`; the whole file is protected because the dev-dependency pins choose the tools the gate runs); every config file that overrides it for pytest, ruff or mypy -- `pytest.ini`, `.pytest.ini`, `tox.ini`, `setup.cfg`, `ruff.toml`, `.ruff.toml`, `mypy.ini`, `.mypy.ini`, and a nested `pyproject.toml`, in any directory; and every workflow under `.github/workflows/` |
+
+A candidate that adds a **check-weakening directive** -- `# noqa`,
+`# type: ignore`, another lint disable, a `pytest.mark.skip`/`xfail`,
+`pytest.skip(`, `unittest.skip` or `expectedFailure` -- to an added Python line
+is the same owner question, even when no definition file changed. The block lists
+every directive it found (`path: line [kind]`) and the reason code is
+`GATE_WEAKENING_DIRECTIVE_ADDED`. This is a line scan of the candidate diff, so a
+string literal that merely contains directive-shaped text can appear; the owner
+sees the exact line and decides. Removing an existing suppression is not a
+directive (only added lines count).
 
 Mechanism (`saberops.gate_scope`, `saberops.gate_runner`):
 
-- `check_gate_protection(changed_paths, touches)` is the pure path check over the
-  candidate diff, next to the existing write-scope and retirement checks.
+- `check_gate_protection(changed_paths, touches, added_lines=...)` is the pure
+  path check over the candidate diff, next to the existing write-scope and
+  retirement checks; `scan_weakening_directives(added_lines)` lists the added
+  suppression and skip lines.
 - `load_base_gate_definitions(repo, base)` reads the definitions from the git
   object store at `base` (`git ls-tree` + `git show`), never from the candidate.
 - `verify_gate_definitions(repo, base, changed_paths=..., touches=...)` compares
   those base bytes with the candidate working tree, including committed branch
   changes, uncommitted edits and untracked files (`git status --untracked-files=all`),
   so an added or deleted `conftest.py` counts as well. Byte-identical definitions
-  *are* the base definitions, so a gate that runs is a base-trusted gate.
+  *are* the base definitions, so a gate that runs is a base-trusted gate. It also
+  scans `git diff base` for added directives.
 - The real job check (`_run_configured_gate`) and acceptance (`GateRunner`) both
   run `verify_gate_definitions` before their command. The job check returns a
   failed check whose stderr carries `GATE_PROTECTION_BLOCKED:
-  GATE_PROTECTED_PATH_MUTATED: <paths>` and the owner question; acceptance
-  raises `GateProtectionBlockedError`, rolls the target back and records the
-  same question. A successful acceptance receipt records the verdict under
-  `gate_protection` (tampered paths, per-path digests and the base SHA).
+  GATE_PROTECTED_PATH_MUTATED: <paths>` (or `GATE_WEAKENING_DIRECTIVE_ADDED`) and
+  the owner question; acceptance raises `GateProtectionBlockedError`, rolls the
+  target back and records the same question. A successful acceptance receipt
+  records the verdict under `gate_protection` (tampered paths, per-path digests,
+  added directives and the base SHA).
 - `touches` is **evidence, not authorization**: a lane that declares a protected
   path in its `Touches` is still blocked; the declaration is recorded in
   `declared_paths` and named in the owner question.
 
 Owner escalation workflow:
 
-1. The block raises an owner question: accept the definition change
+1. The block raises an owner question: accept the definition or directive change
    into the base SHA and re-run the gate against the new base, or reject the change.
 2. An accepted definition change reaches the base SHA through the normal owner
    merge; the next gate then loads the new definition from that new base. A lane

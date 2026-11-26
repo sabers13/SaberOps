@@ -61,6 +61,9 @@ tampering is not a check.
    - new catch-all exception handlers added by the candidate.
    Ordinary fixes that edit tests therefore remain reviewable work; the
    reviewer sees the facts and decides. Only changed gate definitions block.
+   *(H41 / [ADR-0097](0097-gate-config-files-and-switch-offs.md) later made an
+   added suppression or skip directive an owner question rather than evidence
+   only; the evidence is still produced for the reviewer.)*
 6. **The benchmark has a must-fail row for this.** The fake-mode rig adds a
    `gate protection: weakened conftest` drill: a fake worker commits a
    `conftest.py` that would run and skip the tests; the job must fail with

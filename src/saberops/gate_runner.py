@@ -1929,6 +1929,30 @@ def _git_bytes(repo: Path, args: Sequence[str], *, label: str) -> bytes:
     return completed.stdout
 
 
+def _git_added_lines(repo: Path, base: str) -> dict[str, list[str]]:
+    """Added lines per changed path between ``base`` and the candidate worktree.
+
+    ``git diff base`` includes committed, staged and unstaged tracked changes,
+    so a directive left uncommitted is still seen.  An untracked file is not
+    part of the candidate commit and is deliberately out of this scan (the
+    protected-definition check already reports untracked definitions).
+    """
+    listing = _git_bytes(
+        repo,
+        ["diff", "--unified=0", base, "--"],
+        label=f"read the candidate diff from {base}",
+    ).decode("utf-8", "replace")
+    added: dict[str, list[str]] = {}
+    current = ""
+    for line in listing.splitlines():
+        if line.startswith("+++ "):
+            current = line[6:] if line.startswith("+++ b/") else ""
+            continue
+        if current and line.startswith("+") and not line.startswith("+++"):
+            added.setdefault(current, []).append(line[1:])
+    return added
+
+
 def load_base_gate_definitions(repo: Path | str, base: str) -> dict[str, str]:
     """Load every protected gate definition **from the base SHA**.
 
@@ -2021,9 +2045,15 @@ def verify_gate_definitions(
     base definitions, so the gate it executes is the base-trusted gate.  Any
     difference blocks: the gate cannot run under definitions the candidate
     edited, and the block is an owner question, never a self-authorization.
+
+    The candidate's added Python lines are scanned for check-weakening
+    directives (suppression comments and test skips) in the same pass.  Those
+    do not change a definition file, but they change the verdict the gate
+    reaches, so they are the same owner question; the result lists each one.
     """
     root = Path(repo).expanduser()
-    verdict = check_gate_protection(changed_paths, touches)
+    added_lines = _git_added_lines(root, base) if base else {}
+    verdict = check_gate_protection(changed_paths, touches, added_lines=added_lines)
     tampered = set(verdict.tampered_paths)
     detected = set(verdict.detected_by)
     base_verified = False
@@ -2045,14 +2075,14 @@ def verify_gate_definitions(
         base_verified = not mismatched
         if mismatched:
             detected.add("base-content")
-    if not tampered:
+    if not tampered and not verdict.directives:
         return GateProtectionResult(
             is_protected=False,
             base_sha=base,
             base_verified=base_verified,
             detected_by=tuple(sorted(detected)),
         )
-    merged = check_gate_protection(sorted(tampered), touches)
+    merged = check_gate_protection(sorted(tampered), touches, added_lines=added_lines)
     return GateProtectionResult(
         is_protected=True,
         tampered_paths=merged.tampered_paths,
@@ -2062,12 +2092,13 @@ def verify_gate_definitions(
         owner_question=merged.owner_question,
         base_sha=base,
         base_verified=base_verified,
-        detected_by=tuple(sorted(detected)),
+        detected_by=tuple(sorted(detected | set(merged.detected_by))),
         digests=tuple(
             (path, definition_digest(candidate_definitions[path]))
             for path in merged.tampered_paths
             if path in candidate_definitions
         ),
+        directives=merged.directives,
     )
 
 

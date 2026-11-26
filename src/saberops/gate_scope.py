@@ -9,12 +9,15 @@ Three checks the engine raises itself, all pure and fail-closed:
   authorized by the lane's retirement table.  Unauthorized deletion or a
   weakened (edited) test blocks: tests are the contract.
 * **Gate protection** -- the files that *define* a gate (gate scripts, every
-  ``conftest.py``, the pytest/ruff/mypy configuration in ``pyproject.toml`` and
-  the CI workflow) may never be changed by the candidate whose gate is being
-  run.  A candidate that edits them could change its own verdict, so the check
-  fails closed and raises an owner question.  The engine loads the same
-  definitions from the base SHA and compares content, which also catches
-  uncommitted edits that a branch diff does not see.
+  ``conftest.py``, the pytest/ruff/mypy/tox configuration files that override
+  ``pyproject.toml``, ``pyproject.toml`` and every CI workflow) may never be
+  changed by the candidate whose gate is being run.  A candidate that edits
+  them could change its own verdict, so the check fails closed and raises an
+  owner question.  The engine loads the same definitions from the base SHA and
+  compares content, which also catches uncommitted edits that a branch diff
+  does not see.  A candidate that *adds* a check-weakening directive (a
+  suppression comment or a test skip) to any added Python line is the same
+  kind of owner question: the engine lists every directive it found.
 
 Path matching is deliberately conservative: a ``touch``/``must-not-touch``
 entry matches itself and everything under it when written as a directory
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import re
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -308,6 +312,9 @@ def git_changed_files(repo_path: str, base: str, head: str = "HEAD") -> tuple[st
 #: Stable reason code for a candidate that mutated a protected gate definition.
 GATE_PROTECTED_PATH_MUTATED: Final[str] = "GATE_PROTECTED_PATH_MUTATED"
 
+#: Stable reason code for a candidate that added a check-weakening directive.
+GATE_WEAKENING_DIRECTIVE_ADDED: Final[str] = "GATE_WEAKENING_DIRECTIVE_ADDED"
+
 #: The gate definitions the engine trusts explicitly.  Matching is done
 #: by :data:`PROTECTED_GATE_DIRECTORIES`, which contains this whole directory;
 #: the tuple is kept as the named policy list so the intent stays readable.
@@ -324,8 +331,10 @@ PROTECTED_GATE_SCRIPT_PATHS: Final[tuple[str, ...]] = (
 #: Whole directories that only ever hold developer/CI gate tooling.  The
 #: directory rule is what closes the gap the named list leaves: a candidate
 #: that weakened ``scripts/lane-check.sh`` (the G1 executor itself) or added a
-#: new gate helper would otherwise change its own verdict.
-PROTECTED_GATE_DIRECTORIES: Final[tuple[str, ...]] = ("scripts",)
+#: new gate helper would otherwise change its own verdict.  ``.github/workflows``
+#: is protected as a directory so every workflow, including ones added later,
+#: is a gate definition and not only ``ci.yml``.
+PROTECTED_GATE_DIRECTORIES: Final[tuple[str, ...]] = ("scripts", ".github/workflows")
 
 #: Gate configuration files: the pytest/ruff/mypy sections of ``pyproject.toml``
 #: and the pinned CI workflow.  ``pyproject.toml`` is protected as a whole file
@@ -336,9 +345,26 @@ PROTECTED_GATE_CONFIG_PATHS: Final[tuple[str, ...]] = (
     ".github/workflows/ci.yml",
 )
 
-#: Any file with this basename is test infrastructure: pytest loads every
-#: ``conftest.py`` on the path to a collected test, root and subdirectories alike.
-PROTECTED_GATE_BASENAMES: Final[tuple[str, ...]] = ("conftest.py",)
+#: Any file with this basename is test infrastructure or a configuration file
+#: that overrides ``pyproject.toml``: pytest loads every ``conftest.py`` on the
+#: path to a collected test, and pytest, ruff and mypy all prefer their own
+#: config file over ``pyproject.toml`` -- even an empty ``pytest.ini``.  The
+#: basename rule deliberately matches in every directory because ruff discovers
+#: the nearest ``ruff.toml``/``.ruff.toml``/``pyproject.toml`` and pytest
+#: searches upward from the collected path, so a nested copy changes the
+#: verdict for the files near it.
+PROTECTED_GATE_BASENAMES: Final[tuple[str, ...]] = (
+    "conftest.py",
+    "pyproject.toml",
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "setup.cfg",
+    "ruff.toml",
+    ".ruff.toml",
+    "mypy.ini",
+    ".mypy.ini",
+)
 
 #: Gate-relevant ``pyproject.toml`` tables, reported as evidence only.
 _PYPROJECT_GATE_TOOL_TABLES: Final[tuple[str, ...]] = ("mypy", "pytest.ini_options", "ruff")
@@ -358,6 +384,74 @@ def is_protected_gate_path(path: str) -> bool:
 
 
 @dataclass(frozen=True)
+class WeakeningDirective:
+    """One added line that disables or narrows a check it would otherwise face."""
+
+    kind: str
+    path: str
+    line: str
+
+    def as_text(self) -> str:
+        return f"{self.path}: {self.line} [{self.kind}]"
+
+
+#: Canonical added-line directives, shared with the review evidence builder so
+#: the gate question and the reviewer see the same facts.  ``noqa`` and
+#: ``type-ignore`` are named separately because they are the two the owner
+#: asked to see individually; the remaining lint disables are one kind.
+WEAKENING_DIRECTIVE_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    ("noqa", re.compile(r"#\s*noqa\b", re.IGNORECASE)),
+    ("type-ignore", re.compile(r"#\s*type:\s*ignore\b", re.IGNORECASE)),
+    (
+        "lint-disable",
+        re.compile(
+            r"#\s*(?:pylint:\s*disable|pyright:\s*ignore|mypy:\s*ignore"
+            r"|ruff:\s*noqa|eslint-disable|pragma:\s*no\s*cover|nosec)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "skip",
+        re.compile(
+            r"pytest\.mark\.(?:skip|skipif|xfail)|pytest\.skip\(|unittest\.skip"
+            r"|@skip\b|skipIf|expectedFailure",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+#: Directives are Python syntax, so only Python source lines are scanned.
+_DIRECTIVE_SUFFIXES: Final[tuple[str, ...]] = (".py", ".pyi")
+
+
+def scan_weakening_directives(
+    added_lines: Mapping[str, Sequence[str]],
+) -> tuple[WeakeningDirective, ...]:
+    """List every check-weakening directive on a candidate's added Python lines.
+
+    ``added_lines`` maps a repo-relative path to the lines the candidate added.
+    A line matching more than one pattern is reported once, under the first
+    kind, so the owner question never double-counts a single comment.
+    """
+    found: list[WeakeningDirective] = []
+    for raw_path in sorted(added_lines):
+        try:
+            path = normalize_path(raw_path)
+        except GateScopeError:
+            continue
+        if not path.endswith(_DIRECTIVE_SUFFIXES):
+            continue
+        for line in added_lines[raw_path]:
+            for kind, pattern in WEAKENING_DIRECTIVE_PATTERNS:
+                if pattern.search(line):
+                    found.append(
+                        WeakeningDirective(kind=kind, path=path, line=line.strip())
+                    )
+                    break
+    return tuple(found)
+
+
+@dataclass(frozen=True)
 class GateProtectionResult:
     """Outcome of the gate-protection check for one candidate.
 
@@ -366,6 +460,7 @@ class GateProtectionResult:
     self-authorization path -- a lane that *declared* the edit in its
     ``Touches`` is still blocked; ``declared_paths`` only records that the
     declaration existed, so the owner sees who asked for the change.
+    ``directives`` lists every added check-weakening line the engine found.
     """
 
     is_protected: bool
@@ -378,6 +473,7 @@ class GateProtectionResult:
     base_verified: bool = False
     detected_by: tuple[str, ...] = ()
     digests: tuple[tuple[str, str], ...] = ()
+    directives: tuple[WeakeningDirective, ...] = ()
 
     @property
     def allowed(self) -> bool:
@@ -397,50 +493,82 @@ class GateProtectionResult:
             "base_verified": self.base_verified,
             "detected_by": list(self.detected_by),
             "digests": [[path, digest] for path, digest in self.digests],
+            "directives": [
+                {"kind": item.kind, "path": item.path, "line": item.line}
+                for item in self.directives
+            ],
         }
 
 
 def check_gate_protection(
     changed_paths: Iterable[str],
     touches: Iterable[str] | None = None,
+    added_lines: Mapping[str, Sequence[str]] | None = None,
 ) -> GateProtectionResult:
-    """Refuse a candidate diff that edits the gate definitions it runs under.
+    """Refuse a candidate diff that edits or weakens the checks it runs under.
 
     ``touches`` is the lane's declared ``Touches`` list and is *evidence only*:
     it tells the owner whether the change was declared, and never authorizes
-    it.  Authorization requires the owner to accept the change into the base
-    SHA, after which a new gate compares against the new base.
+    it.  ``added_lines`` maps changed paths to the lines the candidate added;
+    a suppression comment or test skip among them is the same owner question.
+    Authorization requires the owner to accept the change into the base SHA,
+    after which a new gate compares against the new base.
     """
     paths = sorted({normalize_path(path) for path in changed_paths})
     tampered = tuple(path for path in paths if is_protected_gate_path(path))
-    if not tampered:
+    directives = scan_weakening_directives(added_lines or {})
+    if not tampered and not directives:
         return GateProtectionResult(is_protected=False)
     declared = {normalize_path(entry) for entry in (touches or ())}
     declared_paths = tuple(path for path in tampered if path in declared)
-    reason = (
-        f"{GATE_PROTECTED_PATH_MUTATED}: the candidate changed gate "
-        f"definition(s) {', '.join(tampered)}"
-    )
-    question = (
-        "Owner decision required: the candidate changed gate definition(s) "
-        f"{', '.join(tampered)}. The gate cannot run under definitions the "
-        "candidate itself edited. Accept the definition change into the base "
-        "SHA (then re-run the gate against the new base) or reject the change."
-    )
-    if declared_paths:
-        question += (
-            " The lane declared "
-            f"{', '.join(declared_paths)} in its Touches; a declaration is not "
-            "an authorization."
+    reasons: list[str] = []
+    questions: list[str] = []
+    detected: list[str] = []
+    if tampered:
+        reasons.append(
+            f"{GATE_PROTECTED_PATH_MUTATED}: the candidate changed gate "
+            f"definition(s) {', '.join(tampered)}"
+        )
+        detected.append("branch-diff")
+        question = (
+            "Owner decision required: the candidate changed gate definition(s) "
+            f"{', '.join(tampered)}. The gate cannot run under definitions the "
+            "candidate itself edited. Accept the definition change into the base "
+            "SHA (then re-run the gate against the new base) or reject the change."
+        )
+        if declared_paths:
+            question += (
+                " The lane declared "
+                f"{', '.join(declared_paths)} in its Touches; a declaration is "
+                "not an authorization."
+            )
+        questions.append(question)
+    if directives:
+        reason_listing = "; ".join(item.as_text() for item in directives)
+        reasons.append(
+            f"{GATE_WEAKENING_DIRECTIVE_ADDED}: the candidate added "
+            f"check-weakening directive(s): {reason_listing}"
+        )
+        detected.append("added-lines")
+        question_lines = "\n".join(f"- {item.as_text()}" for item in directives)
+        questions.append(
+            "Owner decision required: the candidate added check-weakening "
+            f"directive(s):\n{question_lines}\nThe gate cannot run while the "
+            "candidate weakens checks it is judged by. Accept the directive(s) "
+            "into the base SHA (then re-run the gate against the new base) or "
+            "reject the change."
         )
     return GateProtectionResult(
         is_protected=True,
         tampered_paths=tampered,
         declared_paths=declared_paths,
-        reason_code=GATE_PROTECTED_PATH_MUTATED,
-        reason=reason,
-        owner_question=question,
-        detected_by=("branch-diff",),
+        reason_code=(
+            GATE_PROTECTED_PATH_MUTATED if tampered else GATE_WEAKENING_DIRECTIVE_ADDED
+        ),
+        reason="\n".join(reasons),
+        owner_question="\n".join(questions),
+        detected_by=tuple(detected),
+        directives=directives,
     )
 
 
@@ -506,16 +634,19 @@ def changed_gate_config_sections(base_text: str, head_text: str) -> tuple[str, .
 __all__ = [
     "GATE_CONFIG_SECTIONS",
     "GATE_PROTECTED_PATH_MUTATED",
+    "GATE_WEAKENING_DIRECTIVE_ADDED",
     "PROTECTED_GATE_BASENAMES",
     "PROTECTED_GATE_CONFIG_PATHS",
     "PROTECTED_GATE_DIRECTORIES",
     "PROTECTED_GATE_SCRIPT_PATHS",
+    "WEAKENING_DIRECTIVE_PATTERNS",
     "GateProtectionResult",
     "GateScopeError",
     "RetirementAction",
     "RetirementCheck",
     "RetirementEntry",
     "ScopeCheck",
+    "WeakeningDirective",
     "changed_gate_config_sections",
     "check_gate_protection",
     "check_test_retirement",
@@ -529,4 +660,5 @@ __all__ = [
     "is_protected_gate_path",
     "normalize_path",
     "parse_retirement_table",
+    "scan_weakening_directives",
 ]

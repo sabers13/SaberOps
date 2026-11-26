@@ -173,6 +173,24 @@ def test_gate_protection_covers_the_named_gate_definitions() -> None:
     assert is_protected_gate_path("tests/deep/nested/conftest.py") is True
     assert is_protected_gate_path("pyproject.toml") is True
     assert is_protected_gate_path(".github/workflows/ci.yml") is True
+    # Every workflow is a gate definition, not only ci.yml.
+    assert is_protected_gate_path(".github/workflows/nightly.yml") is True
+    assert is_protected_gate_path(".github/workflows/release.yaml") is True
+    # Config files that override pyproject.toml for pytest, ruff or mypy.
+    for name in (
+        "pytest.ini",
+        ".pytest.ini",
+        "tox.ini",
+        "setup.cfg",
+        "ruff.toml",
+        ".ruff.toml",
+        "mypy.ini",
+        ".mypy.ini",
+        "pkg/sub/pytest.ini",
+        "pkg/sub/ruff.toml",
+        "pkg/sub/pyproject.toml",
+    ):
+        assert is_protected_gate_path(name) is True
 
 
 def test_gate_protection_leaves_product_and_test_paths_alone() -> None:
@@ -184,7 +202,6 @@ def test_gate_protection_leaves_product_and_test_paths_alone() -> None:
         "docs/gate.md",
         "scripts.txt",
         "docs/conftest.md",
-        ".github/workflows/nightly.yml",
     ):
         assert is_protected_gate_path(path) is False
 

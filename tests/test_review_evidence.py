@@ -124,6 +124,35 @@ def test_an_empty_candidate_states_that_the_engine_saw_no_change(tmp_path: Path)
     assert "the engine found no file changed" in evidence
 
 
+def test_deleted_assertions_are_engine_evidence(tmp_path: Path) -> None:
+    """Covers: H41 (a removed assertion reaches the reviewer as engine evidence)."""
+    repo, _base = _repo(tmp_path)
+    (repo / "app.py").write_text(
+        "def greet(name: str) -> str:\n"
+        "    assert name\n"
+        "    return f\"hello {name}\"\n",
+        encoding="utf-8",
+    )
+    _commit(repo)
+    with_assert = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "app.py").write_text(
+        "def greet(name: str) -> str:\n"
+        "    return f\"hello {name}\"\n",
+        encoding="utf-8",
+    )
+    _commit(repo)
+
+    evidence = build_review_evidence(
+        worktree=repo,
+        base_commit=with_assert,
+        task="Simplify greeting.\n\nAcceptance:\nThe greeting still works.",
+        clauses=("The greeting still works.",),
+    )
+
+    assert "deleted assertions: 1" in evidence
+    assert "app.py: assert name" in evidence
+
+
 def test_retirement_suppressions_and_catch_alls_are_engine_evidence(
     tmp_path: Path,
 ) -> None:
