@@ -144,6 +144,7 @@ from saberops.provenance import (
     ProvenanceError,
     assert_candidate_provenance,
     assert_run_repository,
+    candidate_commit_message,
     execution_authorized_bases,
     mint_run_provenance,
 )
@@ -1978,8 +1979,11 @@ class Orchestrator:
         # what was asked, then each attempt's exact prompt and result.  This
         # is evidence, never authority: a write failure is recorded and the
         # run continues (the database remains the source of truth).
+        requested_run = self.db.get_run(run_id)
+        # H44: the job that dispatched this run, for the candidate commit's
+        # trailer block (None for a plain `orch run`).
+        run_job_id = requested_run.job_id if requested_run is not None else None
         try:
-            requested_run = self.db.get_run(run_id)
             if requested_run is not None:
                 record_request(
                     job_folder(self.db.db_path.parent, run_id),
@@ -4535,9 +4539,14 @@ class Orchestrator:
                         # Capture and commit changes in worktree
                         commit_sha = GitManager.commit_changes(
                             worktree_path=wt_path,
-                            message=(
-                                f"orch({run_id}): candidate changes for attempt {attempt_number} "
-                                f"({candidate.provider}/{candidate.model})"
+                            message=candidate_commit_message(
+                                run_id=run_id,
+                                attempt_id=attempt_id,
+                                attempt_number=attempt_number,
+                                base_sha=attempt.base_sha or diff_base_sha,
+                                provider=candidate.provider,
+                                model=candidate.model,
+                                job_id=run_job_id,
                             ),
                         )
                         if commit_sha is None:
@@ -6005,10 +6014,16 @@ class Orchestrator:
                                     )
                                 to_sha_local = GitManager.commit_changes(
                                     worktree_path=local_wt_path,
-                                    message=(
-                                        f"orch({run_id}): candidate changes for "
-                                        f"attempt {attempt_number} "
-                                        f"({cand_provider}/{cand_model})"
+                                    message=candidate_commit_message(
+                                        run_id=run_id,
+                                        attempt_id=local_attempt_id,
+                                        attempt_number=attempt_number,
+                                        base_sha=rep_attempt.base_sha
+                                        or from_sha_local
+                                        or base_commit,
+                                        provider=cand_provider,
+                                        model=cand_model,
+                                        job_id=run_job_id,
                                     ),
                                 )
                                 if to_sha_local is None:

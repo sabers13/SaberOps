@@ -684,6 +684,62 @@ class GitManager:
         return res.stdout.strip() if res.passed else None
 
     @staticmethod
+    def commit_message(repo_path: Path | str, rev: str) -> str:
+        """Return the raw commit message of ``rev`` (raises for an unknown revision)."""
+        res = run_process(["git", "log", "-1", "--format=%B", rev, "--"], cwd=repo_path)
+        if not res.passed:
+            raise RuntimeError(
+                f"Cannot read commit {rev!r} in {repo_path}: {res.stderr.strip()[:500]}"
+            )
+        return res.stdout
+
+    @staticmethod
+    def blame_commit(repo_path: Path | str, path: str, line: int) -> str:
+        """Return the commit SHA that last touched ``path`` at 1-based ``line``."""
+        if line < 1:
+            raise ValueError(f"line must be 1 or greater, got {line}")
+        res = run_process(
+            ["git", "blame", "--porcelain", "-L", f"{line},{line}", "--", path],
+            cwd=repo_path,
+        )
+        first = res.stdout.splitlines()[0].split() if res.passed and res.stdout else []
+        if not first or len(first[0]) < 7:
+            raise RuntimeError(
+                f"Cannot blame {path}:{line} in {repo_path}: {res.stderr.strip()[:500]}"
+            )
+        return first[0]
+
+    @staticmethod
+    def add_note(repo_path: Path | str, rev: str, message: str, *, ref: str) -> None:
+        """Write one note onto ``rev`` under ``ref`` (idempotent, replaces an old note).
+
+        The note is a commit on the notes ref, so it never changes ``rev`` itself.
+        An explicit author identity keeps it independent of the host's Git config.
+        """
+        env = {
+            "GIT_AUTHOR_NAME": "SaberOps",
+            "GIT_AUTHOR_EMAIL": "saberops@localhost",
+            "GIT_COMMITTER_NAME": "SaberOps",
+            "GIT_COMMITTER_EMAIL": "saberops@localhost",
+        }
+        res = run_process(
+            ["git", "notes", "--ref", ref, "add", "-f", "-m", message, rev],
+            cwd=Path(repo_path).resolve(),
+            env=env,
+        )
+        if not res.passed:
+            raise RuntimeError(
+                f"Failed to write note {ref} on {rev}: "
+                f"{redact_remote_secrets(res.stderr).strip()[:500]}"
+            )
+
+    @staticmethod
+    def show_note(repo_path: Path | str, rev: str, *, ref: str) -> str | None:
+        """Return the note text on ``rev`` under ``ref``, or None when there is none."""
+        res = run_process(["git", "notes", "--ref", ref, "show", rev], cwd=repo_path)
+        return res.stdout if res.passed and res.stdout.strip() else None
+
+    @staticmethod
     def compare_and_swap_ref(
         repo_path: Path | str,
         ref: str,

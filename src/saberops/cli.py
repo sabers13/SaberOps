@@ -1487,6 +1487,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Project whose runs to list (default: current directory).",
     )
 
+    # orch provenance <rev> [--repo PATH] [--json]
+    provenance_parser = subparsers.add_parser(
+        "provenance",
+        help=(
+            "Resolve a commit (or a path:line blame target) to the job, run, "
+            "attempt and acceptance evidence recorded for it."
+        ),
+    )
+    provenance_parser.add_argument(
+        "rev",
+        type=str,
+        help="Commit SHA, revision, or path:line to resolve through git blame.",
+    )
+    provenance_parser.add_argument(
+        "--repo",
+        type=str,
+        default=None,
+        help="Repository to read (default: current directory).",
+    )
+    provenance_parser.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON."
+    )
+    provenance_parser.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help="Path to the SQLite store (default: the run's own project store).",
+    )
+
     # orch models
     models_parser = subparsers.add_parser(
         "models",
@@ -4795,6 +4824,87 @@ def handle_list(args: argparse.Namespace) -> int:
     print(f"Database: {service.db.db_path}")
     if owner_db is not None:
         print(f"Owner database: {owner_db.db_path}")
+    return 0
+
+
+def handle_provenance(args: argparse.Namespace) -> int:
+    """Handle `orch provenance <rev>` (H44, ADR-0102).
+
+    Reads only Git and the store that owns the run named by the commit, so a
+    fresh clone with the trailer resolves even when its notes ref was never
+    fetched.  The note adds the gate and review facts when present.
+    """
+    from saberops.provenance import ProvenanceError, resolve_commit_provenance
+
+    repo = Path(args.repo).resolve() if args.repo else Path.cwd()
+    explicit = _explicit_db(args)
+    db = Database(explicit) if explicit is not None else None
+    try:
+        record = resolve_commit_provenance(repo, str(args.rev), db=db)
+    except (ProvenanceError, RuntimeError, ValueError, OSError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    payload = record.as_dict()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    run = payload["run"] or {}
+    attempt = payload["attempt"] or {}
+    job = payload["job"] or {}
+    review = payload["review"] or {}
+    transcript = payload["transcript"] or {}
+    note = payload["note"]
+    print(f"Commit: {record.commit}")
+    print(f"Repository: {record.repo}")
+    print(
+        f"Note: {'present' if note else 'not fetched or absent'} "
+        f"under {record.note_ref} (notes stay local until the owner fetches "
+        "or pushes that ref)"
+    )
+    print(f"  Run        : {run.get('run_id') or record.trailers.get('SaberOps-Run') or 'unknown'}")
+    print(f"  Job        : {job.get('job_id') or record.trailers.get('SaberOps-Job') or 'none'}")
+    print(
+        "  Attempt    : "
+        f"{attempt.get('attempt_id') or record.trailers.get('SaberOps-Attempt') or 'unknown'}"
+    )
+    print(f"  Base       : {record.trailers.get('SaberOps-Base') or 'unknown'}")
+    print(
+        "  Worker     : "
+        f"{attempt.get('provider') or record.trailers.get('SaberOps-Worker') or 'unknown'}"
+        "/"
+        f"{attempt.get('model') or record.trailers.get('SaberOps-Model') or 'unknown'}"
+    )
+    if note:
+        print(
+            f"  Gate       : {note.get('SaberOps-Gate')} "
+            f"({note.get('SaberOps-Gate-Receipt')})"
+        )
+        print(
+            f"  Review     : {note.get('SaberOps-Review')} "
+            f"{note.get('SaberOps-Review-Verdict')} "
+            f"({note.get('SaberOps-Review-Findings')} findings)"
+        )
+        print(
+            f"  Accepted   : {note.get('SaberOps-Accepted-At')} "
+            f"on {note.get('SaberOps-Final-Branch')}"
+        )
+    elif review:
+        print(
+            f"  Review     : {review.get('review_id')} {review.get('verdict')} "
+            f"({review.get('findings')} findings; no acceptance note)"
+        )
+    print(f"  Transcript : {transcript.get('path') or 'none'} [{transcript.get('state')}]")
+    if transcript.get("message"):
+        print(f"               {transcript['message']}")
+    if record.verified is False:
+        print(
+            "  WARNING    : the commit does not match the stored attempt's candidate "
+            "commit; the trailer/note names records that do not bind to this commit"
+        )
+    if record.store_error:
+        print(f"  Store      : unavailable ({record.store_error})")
+    if job.get("goal"):
+        print(f"  Job goal   : {job['goal']}")
     return 0
 
 
@@ -8743,6 +8853,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_watch(args)
     elif args.command == "list":
         return handle_list(args)
+    elif args.command == "provenance":
+        return handle_provenance(args)
     elif args.command == "models":
         return handle_models(args)
     elif args.command == "preflight":

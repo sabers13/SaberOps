@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from saberops.candidate_lifecycle import find_matching_rejection_event
-from saberops.db import Database
+from saberops.db import Database, current_iso_timestamp
 from saberops.gate_receipt import find_valid_receipt, receipt_summary
 from saberops.gate_runner import (
     GateReceipt,
@@ -30,12 +30,16 @@ from saberops.models import (
     RunStatus,
 )
 from saberops.provenance import (
+    NOTES_REF,
+    CandidateProvenance,
     ProvenanceError,
+    acceptance_note_text,
     assert_candidate_provenance,
     assert_run_repository,
     execution_authorized_bases,
 )
 from saberops.steering import undelivered_note_block_text, undelivered_notes_for_run
+from saberops.terminal import get_transcript_path
 
 
 @dataclass(frozen=True)
@@ -1640,6 +1644,26 @@ class AcceptEngine:
             + gate_summary
         )
 
+        # H44 (ADR-0102): every acceptance is the one writer of the Git-visible
+        # provenance note.  The commit itself was frozen before the gate, so
+        # the post-commit facts live under a dedicated notes ref instead.  A
+        # failed write never undoes a verified acceptance -- the commit
+        # trailer already names job/run/attempt and the store keeps every
+        # fact -- but it is recorded in the durable acceptance payload.
+        acceptance_at = current_iso_timestamp()
+        provenance_note = self._write_acceptance_note(
+            run,
+            candidate_sha=new_sha,
+            attempt=final_attempt,
+            provenance=provenance,
+            final_branch=final_branch,
+            accepted_at=acceptance_at,
+            gate_enabled=gate_enabled,
+            gate_skip=gate_skip,
+            gate_receipt=gate_receipt,
+            bound_review=bound_review,
+        )
+
         self.db.record_event(
             run_id,
             "run_accepted",
@@ -1651,6 +1675,7 @@ class AcceptEngine:
                 "gate_receipt": gate_receipt.as_dict() if gate_receipt is not None else None,
                 "gate_skipped": not gate_enabled or gate_skip is not None,
                 "gate_skip": gate_skip,
+                "provenance_note": provenance_note,
                 **({"automatic": dict(automatic)} if automatic is not None else {}),
             },
         )
@@ -1664,3 +1689,79 @@ class AcceptEngine:
             summary=summary,
             gate_passed=gate_enabled,
         )
+
+    def _write_acceptance_note(
+        self,
+        run: Run,
+        *,
+        candidate_sha: str,
+        attempt: Attempt,
+        provenance: CandidateProvenance,
+        final_branch: str,
+        accepted_at: str,
+        gate_enabled: bool,
+        gate_skip: dict[str, Any] | None,
+        gate_receipt: GateReceipt | None,
+        bound_review: ReviewResult | None,
+    ) -> dict[str, Any]:
+        """Write (and verify) the acceptance note under :data:`NOTES_REF`.
+
+        Returns the durable outcome recorded in the ``run_accepted`` payload.
+        Never raises: acceptance has already installed the candidate through
+        the ref CAS and the gate, so a local notes write must not roll it back.
+        """
+        transcript_path = get_transcript_path(self.db, run.id)
+        supervision = self.db.get_supervision(run.id)
+        if supervision is not None and supervision.transcript_path:
+            transcript_path = Path(supervision.transcript_path)
+        if gate_skip is not None:
+            gate_label = "passed (full-gate receipt; integration gate skipped)"
+        elif gate_enabled:
+            gate_label = "passed"
+        else:
+            gate_label = "skipped (gate disabled by project policy)"
+        receipt_digest = (
+            gate_receipt.receipt_digest if gate_receipt is not None else None
+        )
+        if receipt_digest is None and gate_skip is not None:
+            skip_digest = gate_skip.get("receipt_digest")
+            receipt_digest = str(skip_digest) if skip_digest else None
+        findings = (
+            len(self.db.get_findings_for_review(bound_review.id))
+            if bound_review is not None
+            else 0
+        )
+        text = acceptance_note_text(
+            run_id=run.id,
+            job_id=run.job_id,
+            attempt_id=attempt.id,
+            base_sha=provenance.base_sha,
+            candidate_sha=candidate_sha,
+            provider=attempt.provider,
+            model=attempt.model,
+            final_branch=final_branch,
+            accepted_at=accepted_at,
+            gate=gate_label,
+            gate_receipt_digest=receipt_digest,
+            review_id=bound_review.id if bound_review is not None else None,
+            review_verdict=(
+                bound_review.verdict.value if bound_review is not None else None
+            ),
+            finding_count=findings,
+            transcript_path=str(transcript_path),
+            transcript_present=transcript_path.is_file(),
+        )
+        try:
+            repo = assert_run_repository(run)
+            GitManager.add_note(repo, candidate_sha, text, ref=NOTES_REF)
+            written = GitManager.show_note(repo, candidate_sha, ref=NOTES_REF)
+            if not written:
+                raise RuntimeError("note was not readable after it was written")
+        except Exception as exc:  # noqa: BLE001 - never undoes a verified acceptance
+            return {
+                "ref": NOTES_REF,
+                "written": False,
+                "sha": candidate_sha,
+                "error": str(exc)[:500],
+            }
+        return {"ref": NOTES_REF, "written": True, "sha": candidate_sha, "error": None}
