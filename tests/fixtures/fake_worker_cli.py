@@ -427,6 +427,13 @@ def _run_failure_switch(
         sys.stderr.write(f"fake {harness} worker crashed mid-task\n")
         sys.stderr.flush()
         return exit_code if exit_code != 0 else 2
+    if mode in {"uncommitted", "dirty"}:
+        # A real worker that edits files and leaves the commit to the engine.
+        # It succeeds with a dirty worktree, so the orchestrator makes the
+        # candidate commit (and its provenance trailers).
+        if workdir is not None:
+            _write_partial_change(workdir, harness, target_file, content)
+        return 0
     if mode in {"quota_exhausted", "partial_quota"}:
         if mode == "partial_quota" and workdir is not None:
             # A real quota exhaustion arrives mid-turn: the worker has already
