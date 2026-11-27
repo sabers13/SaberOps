@@ -72,7 +72,7 @@ from saberops.jobs.store import (
     JobNotFoundError,
     JobTransitionError,
 )
-from saberops.models import RunStatus
+from saberops.models import TERMINAL_RUN_STATUSES, RunStatus
 from saberops.pause_work import pause_running_jobs
 from saberops.routing_config import RoutingSnapshot, load_effective_routing
 from saberops.runtime_gate import (
@@ -1016,6 +1016,12 @@ def scheduler_tick(
             # whole store as a legacy RUNNING job without a reservation.
             continue
         if not run_id or run_id not in reserved_run_ids:
+            if run_id and tick_status(run_id) in TERMINAL_RUN_STATUSES:
+                # A terminal run holds no capacity.  Its job is a reconciliation
+                # gap (a resumed successor run never reserved capacity), not a
+                # live occupancy: let the tick's reconciliation advance it and
+                # dispatch other work (H47, ADR-0105).
+                continue
             legacy_running_jobs.append(running_job.job_id)
             continue
         if tick_status(run_id) is None:

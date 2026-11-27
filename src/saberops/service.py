@@ -54,6 +54,16 @@ if TYPE_CHECKING:
     from saberops.supervisor import RunSupervisor
 
 
+def _job_id_for_run(db: Database, run: Run) -> str | None:
+    """The durable job a resume successor belongs to (H47, ADR-0105)."""
+    if run.job_id:
+        return run.job_id
+    from saberops.jobs.store import find_job_for_run
+
+    job = find_job_for_run(db, run.id)
+    return job.job_id if job is not None else None
+
+
 class OwnerSelectionError(ValueError):
     """Fail-closed refusal of an owner binding selection (reviewer/orchestrator)."""
 
@@ -677,7 +687,9 @@ class OrchestratorService:
                     training_allowed=run.training_allowed,
                     gate_command=run.gate_command,
                 )
-            started = self._durable_supervisor().start_supervised_run(config=config)
+            started = self._durable_supervisor().start_supervised_run(
+                config=config, job_id=_job_id_for_run(self.db, run)
+            )
         except RunOperationError:
             raise
         except Exception as exc:
@@ -720,7 +732,9 @@ class OrchestratorService:
             }
         try:
             config = prepare_continuation(self.db, run_id)
-            started = self._durable_supervisor().start_supervised_run(config=config)
+            started = self._durable_supervisor().start_supervised_run(
+                config=config, job_id=_job_id_for_run(self.db, run)
+            )
         except (ContinuationError, RuntimeError) as exc:
             raise RunOperationError(
                 "CONTINUE_REFUSED", f"Cannot continue: {exc}"
@@ -826,7 +840,9 @@ class OrchestratorService:
                 model_override=candidate.model,
                 worker_binding_registry=None,
             )
-            started = self._durable_supervisor().start_supervised_run(config=config)
+            started = self._durable_supervisor().start_supervised_run(
+                config=config, job_id=_job_id_for_run(self.db, run)
+            )
             self.db.record_event(
                 started.run_id,
                 "owner_worker_bootstrap_requested",

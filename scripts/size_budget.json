@@ -1,5 +1,5 @@
 {
-  "logic_lines": 179829,
+  "logic_lines": 180073,
   "suppression_comments": 374,
-  "reason": "H45: per-job process and listening-port inventory, leftovers verdict and drills (ADR-0100)"
+  "reason": "H47: resumed successor carries its job; terminal runs reconcile; released-owner cancel (ADR-0105)"
 }

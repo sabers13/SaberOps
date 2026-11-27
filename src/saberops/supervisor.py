@@ -178,6 +178,8 @@ class RunSupervisor:
     def start_supervised_run(
         self,
         config: RunConfig,
+        *,
+        job_id: str | None = None,
     ) -> StartRunResult:
         """Validate via shared RunConfig, create PENDING run, launch the owner.
 
@@ -185,7 +187,8 @@ class RunSupervisor:
         PENDING creation as the CLI path; execution is delegated to the
         installed ``orch`` binary via ``--run-id`` adoption in a detached
         session.  Duplicate execution is prevented by the durable ownership
-        claim taken before the process is created.
+        claim taken before the process is created.  ``job_id`` is the durable
+        job a resume path started this successor for (H47, ADR-0105).
         """
         from saberops.control_plane import (
             freeze_control_plane_policy,
@@ -279,6 +282,7 @@ class RunSupervisor:
             project_id=provenance.project_id,
             project_identity_json=provenance.identity.to_json(),
             objective_id=provenance.objective_id,
+            job_id=job_id,
         )
         if frozen_source:
             parent = frozen_source
@@ -1849,6 +1853,12 @@ class RunSupervisor:
 
         terminated = False
         termination_reason = "no_execution_owner"
+        if owner is not None and not owner.is_active:
+            # The generation already released itself (a launch that never
+            # produced an attempt): there is no live claim to fence and nothing
+            # to signal, so terminalize without a cancellation claim (H47).
+            termination_reason = "owner_already_released"
+            owner = None
         if owner is not None:
             if not self.db.begin_execution_cancellation(
                 run_id,
