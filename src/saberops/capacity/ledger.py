@@ -202,6 +202,27 @@ def _read_connection(db: Database) -> Iterator[sqlite3.Connection]:
         yield conn
 
 
+def recorded_quota_key(
+    provider: str, pool: str, window: str | None = None
+) -> tuple[str, str]:
+    """Return the ``(pool_id, window_id)`` an owner reading is stored under.
+
+    A window-named pool keeps its window; ``window`` names the window for a
+    pool whose name does not, so the reading is never projected against a
+    window it does not measure.
+    """
+    provider_norm = provider.strip().lower()
+    pool_norm = pool.strip().lower()
+    if window is not None and window.strip():
+        return (
+            provider_norm if pool_norm in _WINDOW_NAMES else pool_norm,
+            window.strip().lower(),
+        )
+    return _legacy_pool_and_window(
+        SimpleNamespace(provider=provider_norm, pool=pool_norm)
+    )
+
+
 def record_owner_quota(
     db: Database,
     provider: str,
@@ -234,13 +255,7 @@ def record_owner_quota(
     pool_norm = pool.strip().lower()
     moment = _utcnow(now)
     observed_iso = moment.isoformat()
-    if window is not None and window.strip():
-        window_key = window.strip().lower()
-        pool_id = provider_norm if pool_norm in _WINDOW_NAMES else pool_norm
-    else:
-        pool_id, window_key = _legacy_pool_and_window(
-            SimpleNamespace(provider=provider_norm, pool=pool_norm)
-        )
+    pool_id, window_key = recorded_quota_key(provider_norm, pool_norm, window)
     ensure_tables(db)
     obs_id = f"obs_{uuid.uuid4().hex[:12]}"
     with owner_connection(db) as conn:
@@ -281,9 +296,6 @@ def record_owner_quota(
         reset_at=reset_at,
         routing_state=RoutingState.NORMAL,
         updated_at=observed_iso,
-        pool_id=pool_id,
-        normalized_remaining_pct=pct,
-        window_id=window_key,
     )
 
 

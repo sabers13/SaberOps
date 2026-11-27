@@ -8466,9 +8466,14 @@ def handle_quota_set(args: argparse.Namespace) -> int:
         print(f"[!] Invalid quota: {exc}", file=sys.stderr)
         return 1
 
+    from saberops.capacity.ledger import recorded_quota_key
+
+    _pool_id, recorded_window = recorded_quota_key(
+        args.provider, args.pool, args.window
+    )
     reset_str = state.reset_at or "N/A"
     print(f"Quota set: {state.provider}/{state.pool}")
-    print(f"  window        : {state.window_id or 'ALL'}")
+    print(f"  window        : {recorded_window}")
     print(f"  remaining     : {state.remaining_percent:g}%")
     print(f"  reset         : {reset_str}")
     print(f"  routing state : {state.routing_state.value}")
