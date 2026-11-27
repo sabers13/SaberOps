@@ -35,6 +35,7 @@ from saberops.gate_runner import (
 from saberops.jobs.models import JobRole, JobState, coerce_job_role
 from saberops.model_access import ReadinessService
 from saberops.models import (
+    CandidateState,
     OrchEvent,
     QuotaState,
     ReviewResult,
@@ -391,6 +392,86 @@ class OrchestratorService:
         from saberops.candidate_lifecycle import can_reject_candidate
 
         return can_reject_candidate(self.db, run_id)
+
+    def reject_job(self, target_id: str, *, note: str | None = None) -> dict[str, Any]:
+        """Reject a succeeded job's candidate with a note and resume the work.
+
+        The one owner/planner rejection flow (H50).  The rejection itself is
+        recorded by :func:`saberops.candidate_lifecycle.reject_current_candidate`,
+        the single authority; this method only wires the durable rejection to
+        the next attempt: the note is recorded first (or an already pending
+        note is reused), then the job resumes from its saved candidate so that
+        note is the resumed attempt's resume note (ADR-0068).  A rejection
+        without any note is refused before anything is written.
+        """
+        from saberops.candidate_lifecycle import (
+            project_candidate_state,
+            reject_current_candidate,
+        )
+        from saberops.jobs.service import get_job as read_job
+        from saberops.jobs.service import note_job as record_note
+        from saberops.jobs.service import undelivered_steering_notes
+        from saberops.jobs.store import find_job_for_run
+
+        target = (target_id or "").strip()
+        if not target:
+            raise RunOperationError("REJECT_TARGET_REQUIRED", "A job or run id is required.")
+        job = read_job(self.db, target)
+        if job is None:
+            named_run = self.db.get_run(target)
+            if named_run is None:
+                raise RunOperationError("RUN_NOT_FOUND", f"Run not found: {target}")
+            job = find_job_for_run(self.db, named_run.id)
+            if job is None:
+                raise RunOperationError(
+                    "REJECT_NEEDS_JOB",
+                    "This run has no job, so a rejection note has no next attempt "
+                    "to reach; submit the work as a job.",
+                )
+        if job.state is not JobState.SUCCEEDED:
+            raise RunOperationError(
+                "REJECT_JOB_NOT_SETTLED",
+                f"job {job.job_id} is {job.state.value}; only a succeeded job whose "
+                "candidate awaits acceptance can be rejected. While it runs use "
+                "note_job or redirect_job; when it failed use resume_job.",
+            )
+        source_run_id = job.current_run_id
+        if not source_run_id:
+            raise RunOperationError(
+                "JOB_HAS_NO_RUN", f"job {job.job_id} has no dispatched run to reject."
+            )
+        projection = project_candidate_state(self.db, source_run_id)
+        if projection.state is CandidateState.ACCEPTED:
+            raise RunOperationError(
+                "REJECT_ACCEPTED",
+                f"candidate {projection.candidate_sha[:8] if projection.candidate_sha else ''} "
+                "was already accepted; a rejection cannot undo integration.",
+            )
+        if projection.candidate_sha is None or projection.state is None:
+            raise RunOperationError(
+                "REJECT_NO_CANDIDATE",
+                f"job {job.job_id} has no gate-proven candidate to reject "
+                f"({projection.reason}).",
+            )
+        if note and note.strip():
+            try:
+                record_note(self.db, job.job_id, note, allow_terminal=True)
+            except ValueError as exc:
+                raise RunOperationError("REJECT_NOTE_INVALID", str(exc)) from exc
+        if not undelivered_steering_notes(self.db, job.job_id):
+            raise RunOperationError(
+                "REJECT_NOTE_REQUIRED",
+                "A rejection needs a note for the next attempt; pass one. A note "
+                "already recorded on this job travels with the rejection.",
+            )
+        if projection.state is not CandidateState.REJECTED:
+            reject_current_candidate(self.db, source_run_id)
+        resumed = self.resume_job(job.job_id, from_=RESUME_FROM_LAST_CANDIDATE)
+        return {
+            "rejected_sha": projection.candidate_sha,
+            **resumed,
+            "operation": "reject_candidate",
+        }
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
         """Guardedly retire this run's clean attempt worktrees.
@@ -987,7 +1068,8 @@ class OrchestratorService:
                 source_run_id=previous,
                 note_id=written.note_id,
             )
-        if job.state is not JobState.FAILED:
+        rejected_resume = job.state is JobState.SUCCEEDED
+        if job.state is not JobState.FAILED and not rejected_resume:
             raise RunOperationError(
                 "JOB_NOT_RESUMABLE",
                 f"job {job_id} is {job.state.value}; only a failed job can be resumed. "
@@ -1015,6 +1097,16 @@ class OrchestratorService:
                 f"job {job_id} never dispatched a run, so there is nothing to resume; "
                 "cancel it and submit again.",
             )
+        if rejected_resume:
+            from saberops.candidate_lifecycle import project_candidate_state
+
+            projection = project_candidate_state(self.db, source_run_id)
+            if projection.state is not CandidateState.REJECTED:
+                raise RunOperationError(
+                    "JOB_NOT_RESUMABLE",
+                    f"job {job_id} is SUCCEEDED; only a job whose current candidate "
+                    "the owner rejected can be resumed.",
+                )
 
         note_id: int | None = None
         if note:
@@ -1040,6 +1132,7 @@ class OrchestratorService:
                 source_run_id=source_run_id,
                 from_=chosen,
                 note_id=note_id,
+                allow_succeeded=rejected_resume,
             )
         except (JobConflictError, JobTransitionError) as exc:
             raise RunOperationError(

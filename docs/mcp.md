@@ -75,6 +75,7 @@ first missing step with no stored cursor.
 | `redirect_job` | yes | `job_id`, `text` | `saberops.jobs.service.redirect_job` (stop, keep the work, continue with the note) |
 | `discard_note` | yes | `note_id` | `saberops.jobs.service.discard_note` (drop an undelivered note deliberately) |
 | `resume_job` | yes | `job_id`, `from` (`scratch`/`last_candidate`), `note`, `worker_binding` | `saberops.service.OrchestratorService.resume_job` (retry/continue paths) |
+| `reject_candidate` | yes | `job_id`, `note` | `saberops.service.OrchestratorService.reject_job` (records the canonical rejection, then resumes from the saved candidate) |
 | `ask_advisor` | no | `job_id`, `question` | `saberops.advisor.ask_advisor` (only listed when this project has an advisor route; see below) |
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
 | `read_evidence` | no | `path` | guarded evidence reader |
@@ -265,7 +266,23 @@ The call links one successor back to the job (`FAILED -> RUNNING`, with the
 successor as its current run) so `get_job`, `wait_job` and the scheduler follow
 the new attempt. A repeated call while the job is running returns the successor
 it already has (`already_resumed: true`) and starts nothing. A job that is not
-failed refuses with a reason.
+failed refuses with a reason, except a succeeded job whose candidate the owner
+rejected: that resume is how `reject_candidate` starts the corrected attempt.
+
+## Rejecting a candidate with a note
+
+`reject_candidate` takes a succeeded job's `job_id` and a `note`. It records the
+owner rejection through the engine's single rejection authority, so that exact
+candidate can never be accepted afterwards, then starts the corrected attempt
+from the saved candidate with the note as its resume note. A rejection without
+a note is refused; a note already recorded on the job (for example one sent
+while the attempt ran) travels with the rejection instead of being lost. An
+already accepted candidate is refused because acceptance is terminal, and a job
+that is still running or already failed refuses too (use `note_job` /
+`redirect_job` while it runs, `resume_job` when it failed).
+
+`orch reject <job-or-run-id> [--note TEXT]` is the same flow from the owner's
+terminal; it prints the rejected candidate and the successor run.
 
 `orch resume-job <job-or-run-id> [--from scratch|last_candidate] [--note TEXT]
 [--binding ID]` is the owner-facing form; it also accepts a run id from a plain

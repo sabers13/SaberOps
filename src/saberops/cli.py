@@ -2617,6 +2617,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resume_job_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     resume_job_parser.add_argument("--json", action="store_true", help="JSON output")
+    reject_parser = subparsers.add_parser(
+        "reject",
+        help=(
+            "Reject a succeeded job's candidate with a note and start the corrected "
+            "attempt from the saved candidate; the note is its resume note."
+        ),
+    )
+    reject_parser.add_argument(
+        "target_id", type=str, help="Job id, or a run id (also resumes the job that owns it)."
+    )
+    reject_parser.add_argument(
+        "--note",
+        type=str,
+        default=None,
+        help=(
+            "Rejection note for the next attempt (a note already recorded on the job "
+            "is delivered too). A rejection without any note is refused."
+        ),
+    )
+    reject_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    reject_parser.add_argument("--json", action="store_true", help="JSON output")
 
     # orch project gate-scratch show|set
     #
@@ -8456,6 +8477,29 @@ def handle_resume_job(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_reject(args: argparse.Namespace) -> int:
+    """Handle `orch reject <job-or-run-id> [--note ...]` (H50)."""
+    from saberops.service import RunOperationError
+
+    target = str(args.target_id)
+    service = OrchestratorService(db=db_for_run(args, target))
+    try:
+        result = service.reject_job(
+            target, note=str(args.note) if args.note else None
+        )
+    except RunOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    short = str(result.get("rejected_sha") or "")[:8]
+    print(f"Rejected {short} on {result.get('job_id') or result['source_run_id']}.")
+    print(f"Resumed  : {result['run_id']} (from {result.get('from')})")
+    print(f"    orch wait {result['run_id']} | orch status {result['run_id']}")
+    return 0
+
+
 def handle_retry(args: argparse.Namespace) -> int:
     """Handle `orch retry <run-id>`."""
     return _handle_run_operation(args, "retry")
@@ -9031,6 +9075,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_try_worker(args)
     elif args.command == "resume-job":
         return handle_resume_job(args)
+    elif args.command == "reject":
+        return handle_reject(args)
     elif args.command == "routing":
         if args.routing_command == "show":
             return handle_routing_show(args)

@@ -1,5 +1,5 @@
 {
-  "logic_lines": 180833,
+  "logic_lines": 181142,
   "suppression_comments": 375,
-  "reason": "H48 launch-peak fix + H49 advisor bound + H51 review-refusal projection after rebase (ADR-0105/0107/0109)"
+  "reason": "H50 owner rejection with a note after H48/H49/H51 landed (ADR-0108)"
 }

@@ -237,7 +237,7 @@ def verify_resume_source(db: Database, parent_id: str) -> tuple[Run, Attempt]:
     parent run and the attempt that produced the candidate.
     """
     parent = db.get_run(parent_id)
-    if parent is None or parent.status != RunStatus.FAILED:
+    if parent is None or parent.status not in (RunStatus.FAILED, RunStatus.COMPLETED):
         raise ResumeRefused("Continue is available only for failed runs.")
     if not parent.config_json:
         raise ResumeRefused("This historical run has no saved execution configuration.")
@@ -266,6 +266,17 @@ def verify_resume_source(db: Database, parent_id: str) -> tuple[Run, Attempt]:
         raise ResumeRefused("The saved candidate commit is no longer available.")
     if not GitManager.is_ancestor(target, parent.base_commit, sha):
         raise ResumeRefused("The saved candidate does not descend from this run's base.")
+    if parent.status is RunStatus.COMPLETED:
+        # A completed run is continuable only after the owner rejected its
+        # current candidate (H50): a rejection is terminal for that candidate
+        # and the corrected attempt builds on the saved work.
+        from saberops.candidate_lifecycle import find_matching_rejection_event
+
+        if find_matching_rejection_event(db, parent.id, sha) is None:
+            raise ResumeRefused(
+                "Continue is available only for failed runs or a candidate the "
+                "owner rejected."
+            )
     worktree = Path(attempt.worktree_path)
     if worktree.exists():
         if not GitManager.is_clean(worktree) or GitManager.get_head_commit(worktree) != sha:

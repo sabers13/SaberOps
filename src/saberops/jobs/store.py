@@ -468,6 +468,7 @@ def resume_transition(
     source_run_id: str | None = None,
     from_: str = "scratch",
     note_id: int | None = None,
+    allow_succeeded: bool = False,
     now: datetime | None = None,
 ) -> tuple[Job, bool]:
     """FAILED -> RUNNING with one successor run (resume).
@@ -476,6 +477,8 @@ def resume_transition(
     candidate; the successor is already created by the service layer, so this
     transition only links it and clears the terminal job state.  It is
     idempotent: a repeat that already points at ``run_id`` returns unchanged.
+    ``allow_succeeded`` is the H50 rejection path: the service has proven the
+    job's current candidate was owner-rejected, so SUCCEEDED may also resume.
     Any other state refuses without writing.
     """
     clean_run_id = run_id.strip() if isinstance(run_id, str) else ""
@@ -495,7 +498,9 @@ def resume_transition(
         current_run = row["current_run_id"]
         if state == JobState.RUNNING.value and current_run == clean_run_id:
             return _row_to_job(row), False
-        if state != JobState.FAILED.value:
+        if state != JobState.FAILED.value and not (
+            allow_succeeded and state == JobState.SUCCEEDED.value
+        ):
             raise JobTransitionError(
                 f"job {job_id}: state {state} does not allow this transition"
             )
@@ -517,18 +522,18 @@ def resume_transition(
                 json.dumps(existing, separators=(",", ":")),
                 at,
                 job_id,
-                JobState.FAILED.value,
+                state,
             ),
         )
         if (cur.rowcount or 0) == 0:
-            raise JobConflictError(f"job {job_id} moved concurrently (expected FAILED)")
+            raise JobConflictError(f"job {job_id} moved concurrently (expected {state})")
         try:
             _append_event(
                 conn,
                 job_id=job_id,
                 at=at,
                 kind="resumed",
-                from_state=JobState.FAILED.value,
+                from_state=state,
                 to_state=JobState.RUNNING.value,
                 payload={
                     "run_id": clean_run_id,

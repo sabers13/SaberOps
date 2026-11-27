@@ -91,6 +91,13 @@ evidence, fresh attempt only. A run from a plain `orch run` still resumes by run
 id. `orch retry`, `orch continue` and `orch try-worker` remain as aliases for
 one release and print that they are deprecated.
 
+`orch reject JOB_OR_RUN_ID [--note TEXT]` rejects a succeeded candidate with a
+note: the rejection is recorded so that candidate can never be accepted, and the
+job resumes from its saved candidate with the note as the next attempt's resume
+note. A rejection without a note is refused; a note already pending on the job
+is delivered with it. An already accepted candidate, a running job and a failed
+job all refuse with a reason (use `resume-job` when it failed).
+
 `orch refresh RUN_ID` applies a stale
 candidate's changes in a fresh isolated worktree based on the current
 target commit, runs the gate and the required independent review for the

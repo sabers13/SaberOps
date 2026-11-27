@@ -3,7 +3,8 @@
 The following tools are exposed::
 
     preflight start_walkthrough submit_job submit_plan promote_scout refresh_candidate
-    resume_job redirect_job get_job catch_up plan_status tail_job wait_job list_jobs
+    resume_job reject_candidate redirect_job get_job catch_up plan_status tail_job
+    wait_job list_jobs
     cancel_job note_job discard_note capacity read_evidence list_questions
     answer_question propose_config_change list_proposals get_mode propose_mode_change
     tighten_mode get_pause doctor doctor_fix
@@ -115,6 +116,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "promote_scout",
         "refresh_candidate",
         "resume_job",
+        "reject_candidate",
         "redirect_job",
         "cancel_job",
         "note_job",
@@ -169,6 +171,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "promote_scout",
     "refresh_candidate",
     "resume_job",
+    "reject_candidate",
     "redirect_job",
     "get_job",
     "catch_up",
@@ -1888,6 +1891,32 @@ def _resume_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
     return {"v": SNAPSHOT_SCHEMA_VERSION, **result}
 
 
+def _reject_candidate(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Reject a succeeded job's candidate with a note and resume the work."""
+    from saberops.service import OrchestratorService, RunOperationError
+
+    job_id = _require_text(arguments, "job_id", what="job_id")
+    note = arguments.get("note")
+    db = context.database(read_only=False)
+    try:
+        result = OrchestratorService(db=db).reject_job(
+            job_id,
+            note=note if isinstance(note, str) and note.strip() else None,
+        )
+    except RunOperationError as exc:
+        raise ToolError(str(exc)) from exc
+    context.ledger.append(
+        "candidate_rejected",
+        {
+            "job_id": job_id,
+            "rejected_sha": result.get("rejected_sha"),
+            "run_id": result.get("run_id"),
+        },
+        key=f"candidate-rejected:{job_id}:{result.get('rejected_sha')}",
+    )
+    return {"v": SNAPSHOT_SCHEMA_VERSION, **result}
+
+
 def _list_proposals(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from saberops.config import ConfigError
 
@@ -2585,6 +2614,23 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
             required=("job_id",),
         ),
         _resume_job,
+        mutating=True,
+    )
+    register(
+        "reject_candidate",
+        "Reject the current candidate of a succeeded job with a note and start the "
+        "corrected attempt from its saved candidate, so the note is the next "
+        "attempt's resume note. A rejection without a note is refused; a note "
+        "already recorded on the job travels with it. The rejected candidate "
+        "cannot be accepted afterwards.",
+        _schema(
+            {
+                "job_id": {"type": "string", "minLength": 1},
+                "note": {"type": "string", "minLength": 1, "maxLength": 4000},
+            },
+            required=("job_id",),
+        ),
+        _reject_candidate,
         mutating=True,
     )
     register(

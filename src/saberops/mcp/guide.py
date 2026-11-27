@@ -387,9 +387,17 @@ stays attended.
   "last_candidate"` continues from the candidate the failed run saved, so the
   work is kept. The call refuses with a reason when the job is not failed or
   the chosen path has nothing to resume.
-- `note` travels into the next attempt exactly like `note_job`. When the owner
-  rejects a candidate with a correction, reject it and pass that text as the
-  resume note; the next attempt starts with it.
+- `note` travels into the next attempt exactly like `note_job`.
+
+## Rejecting a candidate
+- When the owner rejects a succeeded candidate with a correction, call
+  `reject_candidate` with the job's `job_id` and that text as `note`. It records
+  the rejection (that candidate can never be accepted) and starts the corrected
+  attempt from the saved candidate with the note as its resume note.
+- A rejection without a note is refused; a note already pending on the job
+  travels with it. An already accepted candidate is refused because acceptance
+  is terminal; use `note_job` or `redirect_job` while a job runs, and
+  `resume_job` when it failed.
 - One call starts at most one successor. Calling again while the job is running
   returns the successor it already has instead of starting another.
 - `worker_binding` is the folded-in try-worker option: the exact blocked
