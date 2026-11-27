@@ -35,7 +35,7 @@ from saberops.capacity.cost_model import (
 )
 from saberops.capacity.exclusions import is_excluding, parse_iso
 from saberops.capacity.freshness import freshness
-from saberops.capacity.snapshot import _legacy_pool_and_window
+from saberops.capacity.snapshot import _WINDOW_NAMES, _legacy_pool_and_window
 from saberops.capacity.store import (
     ensure_tables,
     list_active_exclusions,
@@ -211,6 +211,7 @@ def record_owner_quota(
     *,
     source: str,
     now: datetime | None = None,
+    window: str | None = None,
 ) -> QuotaState:
     """Record an owner (or probe) quota observation and its quota row.
 
@@ -219,6 +220,10 @@ def record_owner_quota(
     :func:`saberops.capacity.snapshot._legacy_pool_and_window`; (2)
     upsert the ``quota_state`` row exactly as ``db.set_quota`` did at
     ``7cac956``, but with ``routing_state = NORMAL``.
+
+    ``window`` records which window the reading measures (for example the
+    owner's weekly subscription figure for a pool whose name is not a window
+    name).  Without it the pool name decides, as before.
     """
     if source not in OWNER_SOURCES:
         raise ValueError(f"source must be one of {OWNER_SOURCES}")
@@ -229,10 +234,13 @@ def record_owner_quota(
     pool_norm = pool.strip().lower()
     moment = _utcnow(now)
     observed_iso = moment.isoformat()
-    key = _legacy_pool_and_window(
-        SimpleNamespace(provider=provider_norm, pool=pool_norm)
-    )
-    pool_id, window_id = key[0], key[1]
+    if window is not None and window.strip():
+        window_key = window.strip().lower()
+        pool_id = provider_norm if pool_norm in _WINDOW_NAMES else pool_norm
+    else:
+        pool_id, window_key = _legacy_pool_and_window(
+            SimpleNamespace(provider=provider_norm, pool=pool_norm)
+        )
     ensure_tables(db)
     obs_id = f"obs_{uuid.uuid4().hex[:12]}"
     with owner_connection(db) as conn:
@@ -243,7 +251,7 @@ def record_owner_quota(
                 source, legacy_provider, legacy_pool, evidence_ref
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (obs_id, pool_id, window_id, pct, reset_at, observed_iso,
+            (obs_id, pool_id, window_key, pct, reset_at, observed_iso,
              source, provider_norm, pool_norm, None),
         )
         conn.execute(
@@ -262,7 +270,7 @@ def record_owner_quota(
         )
         if source == "PROBE":
             _learn_from_probe(
-                conn, pool_id, window_id, pct, reset_at,
+                conn, pool_id, window_key, pct, reset_at,
                 observed_iso, moment, new_row_id=obs_id,
             )
         conn.commit()
@@ -273,6 +281,9 @@ def record_owner_quota(
         reset_at=reset_at,
         routing_state=RoutingState.NORMAL,
         updated_at=observed_iso,
+        pool_id=pool_id,
+        normalized_remaining_pct=pct,
+        window_id=window_key,
     )
 
 

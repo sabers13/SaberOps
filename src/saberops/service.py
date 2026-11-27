@@ -484,6 +484,8 @@ class OrchestratorService:
         pool: str,
         remaining_percent: float,
         reset_at: str | None = None,
+        *,
+        window: str | None = None,
     ) -> QuotaState:
         """Set quota state for a provider pool."""
         return self.db.set_quota(
@@ -491,6 +493,7 @@ class OrchestratorService:
             pool=pool,
             remaining_percent=remaining_percent,
             reset_at=reset_at,
+            window=window,
         )
 
     def enable_quota(self, provider: str, pool: str) -> QuotaState:

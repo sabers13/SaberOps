@@ -211,6 +211,20 @@ def _format_infra_details(notes: list[dict[str, str | None]]) -> str:
     return "\n".join(lines)
 
 
+def _format_skipped_reviewers(details: list[dict[str, object]]) -> str:
+    """Name every reviewer route that was considered and why it was refused."""
+    routes: list[str] = []
+    for detail in details:
+        provider = detail.get("provider")
+        model = detail.get("model")
+        if not provider or not model:
+            continue
+        routes.append(f"{provider}/{model} ({detail.get('reason') or 'skipped'})")
+    if not routes:
+        return ""
+    return "Reviewer routes tried: " + "; ".join(routes) + "."
+
+
 def _pre_dispatch_skip_reason(
     *,
     candidate: WorkerCandidate,
@@ -2033,6 +2047,9 @@ class ReviewEngine:
             else:
                 summary = "No reviewer available"
                 details = ""
+            routes_tried = _format_skipped_reviewers(skipped_candidate_details)
+            if routes_tried:
+                details = f"{details} {routes_tried}".strip()
         else:
             verdict = ReviewVerdict.REVIEW_EXECUTION_FAILED
             summary = "Reviewer execution failed (no usable verdict produced)"

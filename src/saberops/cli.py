@@ -1646,6 +1646,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional quota reset timestamp.",
     )
     quota_set.add_argument(
+        "--window",
+        type=str,
+        default=None,
+        help=(
+            "Window the reading measures (e.g. 'weekly' or '5h'). Without it a "
+            "window-named pool records its own window; otherwise the reading "
+            "applies to every window."
+        ),
+    )
+    quota_set.add_argument(
         "--db",
         type=str,
         default=None,
@@ -8450,6 +8460,7 @@ def handle_quota_set(args: argparse.Namespace) -> int:
             pool=args.pool,
             remaining_percent=args.remaining,
             reset_at=args.reset_at,
+            window=args.window,
         )
     except ValueError as exc:
         print(f"[!] Invalid quota: {exc}", file=sys.stderr)
@@ -8457,6 +8468,7 @@ def handle_quota_set(args: argparse.Namespace) -> int:
 
     reset_str = state.reset_at or "N/A"
     print(f"Quota set: {state.provider}/{state.pool}")
+    print(f"  window        : {state.window_id or 'ALL'}")
     print(f"  remaining     : {state.remaining_percent:g}%")
     print(f"  reset         : {reset_str}")
     print(f"  routing state : {state.routing_state.value}")

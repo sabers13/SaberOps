@@ -251,13 +251,42 @@ def _posture_verify_remedy(selector: str) -> str:
     )
 
 
+def _independent_reviewer_binding(reviewers: Sequence[Any], worker: Any) -> Any | None:
+    """Return the cheapest CHECK binding independent of the build route.
+
+    Independence is the preflight rule: a different model and a different
+    model family from the worker.  "Cheapest" uses the same cheap-plan-model
+    knowledge the scout default uses, preserving the owner's declaration order
+    among equals.  Returns ``None`` when every configured reviewer matches the
+    build route.
+    """
+    from saberops.capacity.admission import matches_model_family
+    from saberops.models import WorkerCandidate
+    from saberops.scout_routing import is_cheap_scout_model
+
+    families = ("gpt-5", "gpt-4", "deepseek", "claude", "gemini", "muse", "ox")
+    independent = []
+    for binding in reviewers:
+        if binding.model.lower() == worker.model.lower():
+            continue
+        candidate = WorkerCandidate(binding.provider, binding.model)
+        if any(
+            matches_model_family(worker, family)
+            and matches_model_family(candidate, family)
+            for family in families
+        ):
+            continue
+        independent.append(binding)
+    independent.sort(key=lambda b: 0 if is_cheap_scout_model(b.provider, b.model) else 1)
+    return independent[0] if independent else None
+
+
 def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
     """Inspect current project setup without sending a model prompt."""
     from datetime import UTC, date, datetime
     from types import SimpleNamespace
 
     from saberops._gate_tools import gate_tools
-    from saberops.capacity.admission import matches_model_family
     from saberops.capacity.freshness import format_age
     from saberops.capacity.loop import scheduler_alive
     from saberops.capacity.snapshot import effective_quota_states
@@ -365,19 +394,25 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
         )
     )
     if reviewer and workers:
-        review_candidate = WorkerCandidate(reviewer.provider, reviewer.model)
-        same_model = workers[0].model.lower() == reviewer.model.lower()
-        same_family = any(
-            matches_model_family(workers[0], family)
-            and matches_model_family(review_candidate, family)
-            for family in ("gpt-5", "gpt-4", "deepseek", "claude", "gemini", "muse", "ox")
-        )
-        if same_model or same_family:
+        if _independent_reviewer_binding([reviewer], workers[0]) is None:
+            alternative = _independent_reviewer_binding(reviewers, workers[0])
+            if alternative is not None:
+                remedy = f"orch reviewer select {shlex.quote(alternative.binding_id)}"
+            else:
+                configured = ", ".join(
+                    f"{binding.provider}/{binding.model}" for binding in reviewers
+                ) or "none"
+                remedy = (
+                    "no independent reviewer is configured: every reviewer "
+                    f"({configured}) matches the build route "
+                    f"{workers[0].provider}/{workers[0].model}; "
+                    "orch access discover claude-code-subscription"
+                )
             results.append(
                 Finding(
                     "FAIL",
                     "reviewer is not independent of the build route",
-                    "orch reviewer select '<independent-binding-id>'",
+                    remedy,
                 )
             )
     routes = [(c.provider, c.model) for c in workers]

@@ -243,6 +243,42 @@ def test_parked_job_quota_evidence_refusal_names_the_exact_command(
     assert "orch quota set anthropic claude-pro" in waited["reason"]
 
 
+def test_quota_set_records_the_window_an_owner_reading_belongs_to(
+    isolated_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """H48/ADR-0106: the weekly figure is recorded as a weekly reading.
+
+    H37 recorded the owner's weekly Claude figure on a subscription pool whose
+    name is not a window name, so every review projected it as a 5-hour reading.
+    ``--window`` records what the number actually measures and the state that
+    reaches admission carries it.
+    """
+    from datetime import UTC
+
+    from saberops.capacity.snapshot import effective_quota_states
+
+    db_path = isolated_env / "orch.db"
+    reset_at = "2026-11-27T07:00:00+00:00"
+    assert main(
+        ["quota", "set", "anthropic", "discovered-pool:claude-code-subscription",
+         "--remaining", "20", "--window", "weekly", "--reset-at", reset_at,
+         "--db", str(db_path)]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "window        : weekly" in out
+
+    states = effective_quota_states(
+        Database(db_path), now=datetime(2026, 11, 27, 3, 0, tzinfo=UTC), run_probes=False
+    )
+    state = next(
+        s for s in states
+        if (getattr(s, "pool_id", None) or s.pool)
+        == "discovered-pool:claude-code-subscription"
+    )
+    assert state.window_id == "weekly"
+    assert state.normalized_remaining_pct == pytest.approx(20.0)
+
+
 def test_quota_list_on_fresh_store_does_not_claim_normal(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

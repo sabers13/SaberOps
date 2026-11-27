@@ -3915,6 +3915,7 @@ class Database:
         *,
         source: str = "OWNER",
         now: datetime | None = None,
+        window: str | None = None,
     ) -> QuotaState:
         """Upsert quota state for a provider pool.
 
@@ -3922,6 +3923,9 @@ class Database:
         the observation is appended to ``capacity_observations`` and the
         ``quota_state`` row is upserted with ``routing_state = NORMAL``.
         No fixed 25 % BLOCK/DEMOTE threshold is applied.
+
+        ``window`` names the window the reading measures when the pool name
+        does not (for example the weekly figure on a subscription pool).
 
         Quota is owner-wide configuration, so a project-local database
         delegates to the single global owner store.
@@ -3934,6 +3938,7 @@ class Database:
                 reset_at=reset_at,
                 source=source,
                 now=now,
+                window=window,
             )
         from saberops.capacity.ledger import record_owner_quota
 
@@ -3945,6 +3950,7 @@ class Database:
             reset_at,
             source=source,
             now=now,
+            window=window,
         )
 
     def enable_quota(self, provider: str, pool: str) -> QuotaState:

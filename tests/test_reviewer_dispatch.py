@@ -551,6 +551,10 @@ def test_bound_reviewer_candidate_empty_registry_refuses(
     )
     assert result.verdict is ReviewVerdict.REVIEW_UNAVAILABLE
     assert call_log == []
+    # H48/ADR-0106: the refusal names the routes it tried and why, so the
+    # planner never has to read the database to learn why review was skipped.
+    assert "Reviewer routes tried:" in result.details
+    assert f"{_R3E1_PROVIDER}/r3e1-first-model (NO_REGISTRY)" in result.details
     refusals = db.get_events_by_type("run_noregistry", "reviewer_binding_unresolvable")
     assert len(refusals) == 1
     assert refusals[0].payload is not None

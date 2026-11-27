@@ -149,6 +149,52 @@ def test_fresh_store_walks_printed_commands(
         stop_scheduler(Database())
 
 
+@pytest.mark.packaged_routing_default
+def test_independent_reviewer_refusal_names_the_alternative(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """H48/ADR-0106: the refusal names a route, never a placeholder to guess.
+
+    H37's owner selected a reviewer whose model equalled the build route and
+    preflight only said "reviewer is not independent of the build route" with
+    ``'<independent-binding-id>'`` to guess.  The remedy now names the cheapest
+    independent CHECK binding, and running it clears the finding.
+    """
+    import shlex
+
+    from lifecycle_rig import build_lifecycle_rig
+
+    from saberops.cli import main
+    from saberops.db import Database
+    from saberops.preflight import collect_preflight
+    from saberops.service import OrchestratorService
+
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    OrchestratorService(db=Database()).set_reviewer_binding(
+        "discovered-binding:reviewer:codex-chatgpt-account:gpt-5.6-terra"
+    )
+    finding = next(
+        item
+        for item in collect_preflight(rig.repo)
+        if item.message == "reviewer is not independent of the build route"
+    )
+    assert "<" not in finding.remedy
+    assert "orch reviewer select" in finding.remedy
+    # The cheapest independent route wins over Anthropic's larger model.
+    assert "discovered-binding:reviewer:opencode-account:opencode-go/deepseek-v4-flash" in (
+        finding.remedy
+    )
+
+    command = shlex.split(finding.remedy)
+    assert command.pop(0) == "orch"
+    assert main(command) == 0
+    assert not [
+        item
+        for item in collect_preflight(rig.repo)
+        if item.message.startswith("reviewer is not independent")
+    ]
+
+
 def test_mcp_preflight_uses_same_findings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from saberops import preflight
     from saberops.mcp.tools import ServerContext, build_default_registry

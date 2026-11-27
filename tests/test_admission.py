@@ -661,6 +661,57 @@ def test_admit_multiple_windows_binds_at_minimum_pace() -> None:
     assert decision.score == pytest.approx(0.05)
 
 
+def test_owner_reading_projects_against_its_recorded_window() -> None:
+    """Covers: H48 / ADR-0106 -- a weekly owner reading is not a 5-hour reading.
+
+    H37's store held the owner's weekly figure (20 %) as a pool reading with no
+    window and every review was refused at RED_LINE_5H with the 8 % 5-hour cost
+    prior.  A reading that records its window keeps the same 15 % red line but
+    projects that window's cost; a window-less reading stays conservative.
+    """
+    now = datetime(2026, 11, 27, 3, 0, tzinfo=UTC)
+    cand = _make_candidate("anthropic", "claude-haiku-4-5-20251001")
+    policy = _make_policy(
+        postures={
+            "anthropic": PostureRecord(
+                "anthropic", "A", ttl_days=90, verified_on="2026-11-01"
+            )
+        }
+    )
+
+    def reading(remaining: float, window: str) -> list[QuotaState]:
+        state = QuotaState(
+            provider="anthropic",
+            pool="claude-pro",
+            remaining_percent=remaining,
+            reset_at=(now + timedelta(days=6)).isoformat(),
+            routing_state=RoutingState.NORMAL,
+            updated_at=now.isoformat(),
+        )
+        object.__setattr__(state, "pool_id", "claude-pro")
+        object.__setattr__(state, "window_id", window)
+        object.__setattr__(state, "normalized_remaining_pct", remaining)
+        object.__setattr__(state, "freshness", "FRESH")
+        object.__setattr__(state, "source", "OWNER")
+        return [state]
+
+    admitted = admit(cand, now=now, policy=policy, quota_states=reading(20.0, "weekly"))
+    assert admitted.admitted is True
+    assert admitted.binding_window == "weekly"
+    # The weekly prior (2.5 % for a medium job), never the 5-hour 8 %.
+    assert admitted.cost_estimate == pytest.approx(2.5)
+
+    refused = admit(cand, now=now, policy=policy, quota_states=reading(5.0, "weekly"))
+    assert refused.admitted is False
+    assert refused.reason == "RED_LINE_WEEKLY"
+
+    # A reading with no recorded window keeps the conservative 5-hour reading:
+    # the owner records which window it belongs to; the engine never guesses.
+    windowless = admit(cand, now=now, policy=policy, quota_states=reading(20.0, "ALL"))
+    assert windowless.admitted is False
+    assert windowless.reason == "RED_LINE_5H"
+
+
 def test_posture_first_prevents_unconfigured_fail_open() -> None:
     """Covers: posture checked before unconfigured capacity grace (fail-closed)."""
     now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)

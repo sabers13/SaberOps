@@ -282,8 +282,11 @@ re-emit byte-identically.
 
 ## Usage and account limits
 
-`orch quota set|list|enable` manages provider-pool quota state; `orch models`
-and `orch doctor` report local readiness. Account limits use the CLI's own
+`orch quota set|list|enable` manages provider-pool quota state. The reading
+belongs to the pool; pass `--window weekly` (or another window the plan
+declares) when the pool name does not say which window the number measures, so
+the engine projects a job's cost against that window instead of the 5-hour
+default. `orch models` and `orch doctor` report local readiness. Account limits use the CLI's own
 supported metadata interface where available. Local token activity
 comes from numeric session records on this machine. Local activity is not a subscription bill
 or an account-wide allowance. Missing counters remain unknown; large histories

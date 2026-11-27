@@ -427,6 +427,57 @@ def test_selected_reviewer_blocked_pool_refuses_with_zero_launch(
     assert db.get_dispatch_evidence_for_run("run_pool_b_blocked") == []
 
 
+def test_weekly_owner_reading_runs_a_cheap_review_and_a_low_one_refuses(
+    isolated_xdg: None, tmp_path: Path
+) -> None:
+    """H48/ADR-0106: the owner's weekly figure is projected as a weekly cost.
+
+    H37 recorded the weekly Claude figure (20 %) on a subscription pool and
+    every review was refused at RED_LINE_5H with the 8 % 5-hour prior.  The
+    same reading, recorded as weekly, keeps the 15 % red line but projects the
+    weekly cost; a genuinely low weekly reading still refuses and names the
+    route and reason.
+    """
+    _binding_a, binding_b, _pa, _pb, pool_a, pool_b = _seed_two_connection_reviewers()
+    snapshot_json, digest = _seed_quota_policy_pools(pool_a, pool_b)
+    repo = _git_repo(tmp_path / "weekly-reading" / "repo")
+    db = Database(tmp_path / "weekly-reading" / "review.db")
+
+    _seed_reviewable_run(
+        db,
+        repo,
+        "run_weekly_reading_ok",
+        control_plane_snapshot_json=snapshot_json,
+        control_plane_snapshot_digest=digest,
+    )
+    db.set_quota(_R3E12_PROVIDER, pool_b, 20.0, window="weekly")
+    _engine, call_log, result = _run_bound_reviewer(
+        db, "run_weekly_reading_ok", binding_b
+    )
+    assert result.verdict is ReviewVerdict.PASS
+    assert call_log == [f"review:{_R3E12_REVIEWER_MODEL}"]
+
+    _seed_reviewable_run(
+        db,
+        repo,
+        "run_weekly_reading_low",
+        control_plane_snapshot_json=snapshot_json,
+        control_plane_snapshot_digest=digest,
+    )
+    db.set_quota(_R3E12_PROVIDER, pool_b, 5.0, window="weekly")
+    _engine, call_log, result = _run_bound_reviewer(
+        db, "run_weekly_reading_low", binding_b
+    )
+    assert result.verdict is ReviewVerdict.REVIEW_UNAVAILABLE
+    assert call_log == []
+    assert result.details is not None
+    assert f"{_R3E12_PROVIDER}/{_R3E12_REVIEWER_MODEL} (quota_blocked)" in result.details
+    skipped = db.get_events_by_type("run_weekly_reading_low", "review_candidate_skipped")
+    assert len(skipped) == 1
+    assert skipped[0].payload is not None
+    assert skipped[0].payload["reason"] == "quota_blocked"
+
+
 def _seed_shared_membership_quota_policies(
     pool_a: str, pool_b: str
 ) -> tuple[str, str]:

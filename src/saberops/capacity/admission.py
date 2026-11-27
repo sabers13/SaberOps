@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from saberops.capacity.cost_model import CostState, SizeBucket, cost_estimate
 from saberops.capacity.exclusions import model_scope_matches, parse_iso
+from saberops.capacity.freshness import is_owner_source
 from saberops.capacity.ledger import PoolDraw
 from saberops.capacity.snapshot import _legacy_pool_and_window
 from saberops.control_plane import (
@@ -356,6 +357,41 @@ def is_capacity_subsystem_configured(
         p.verified_on is not None for p in effective_policy.plans.postures.values()
     )
     return has_quota or has_verified_postures
+
+
+def _observation_window(state: QuotaState) -> str:
+    """The window an observation measures, with ``"all"`` for a pool reading."""
+    raw_window = getattr(state, "window_id", None) or getattr(state, "window", None)
+    if not isinstance(raw_window, str) or not raw_window.strip():
+        _, raw_window = _legacy_pool_and_window(state)
+    cleaned = raw_window.strip()
+    return "all" if cleaned.upper() == "ALL" else cleaned.lower()
+
+
+def _observation_governs_pool(
+    state: QuotaState,
+    *,
+    pool_id: str,
+    candidate_provider: str,
+    binding_scoped: bool,
+) -> bool:
+    """True when this observation is evidence for the drawn pool."""
+    state_pool = getattr(state, "pool_id", None) or state.pool
+    return state_pool == pool_id or (
+        not binding_scoped
+        and pool_id == candidate_provider.lower()
+        and state.provider.lower() == pool_id
+    )
+
+
+def _observation_remaining(state: QuotaState) -> float | None:
+    raw_value = getattr(state, "normalized_remaining_pct", None)
+    if raw_value is None:
+        raw_value = state.remaining_percent
+    try:
+        return float(raw_value) if raw_value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def admit(
@@ -763,43 +799,82 @@ def admit(
                     break
 
         # Windows to evaluate
-        windows = plan.windows if plan is not None and plan.windows else (Window(id="5h"),)
+        windows = list(plan.windows) if plan is not None and plan.windows else [Window(id="5h")]
+
+        pool_readings = [
+            state
+            for state in states
+            if not getattr(state, "exclusion_id", None)
+            and _observation_governs_pool(
+                state,
+                pool_id=pool_id,
+                candidate_provider=candidate.provider,
+                binding_scoped=binding_scoped,
+            )
+        ]
+        pool_has_probe = any(
+            not is_owner_source(getattr(state, "source", None))
+            for state in pool_readings
+        )
+        # An owner reading may name the window it measures (``orch quota set
+        # --window weekly``).  Evaluate that window with its own cost prior and
+        # red-line reason instead of projecting it as 5h or dropping it: a
+        # weekly reading is not a 5-hour reading, and an ignored reading would
+        # silently bypass the red line.  Measured windows come first so a
+        # refusal names the window the owner actually reported.
+        declared_windows = list(windows)
+        declared_ids = {window.id for window in declared_windows}
+        observed_windows = {_observation_window(state) for state in pool_readings} - {"all"}
+        windows = [window for window in declared_windows if window.id in observed_windows]
+        windows += [
+            Window(id=observed)
+            for observed in sorted(observed_windows - declared_ids)
+        ]
+        windows += [window for window in declared_windows if window.id not in observed_windows]
 
         for win in windows:
-            # Find matching quota observation for this pool and window
+            # Find the observation for this pool and window: an exact window
+            # match, else the pool-wide reading.  With neither, a recorded
+            # window reading still governs this window's red line -- its cost
+            # is only ever projected onto the window it describes.
             matched_state: QuotaState | None = None
-            for s in states:
-                if getattr(s, "exclusion_id", None):
-                    continue
-                s_pool = getattr(s, "pool_id", None) or s.pool
-                matches_provider_pool = (
-                    not binding_scoped
-                    and pool_id == candidate.provider.lower()
-                    and s.provider.lower() == pool_id
-                )
-                if s_pool == pool_id or matches_provider_pool:
-                    s_win_raw = getattr(s, "window_id", None) or getattr(s, "window", None)
-                    if isinstance(s_win_raw, str) and s_win_raw.strip():
-                        clean_w = s_win_raw.strip()
-                        s_win = "ALL" if clean_w.upper() == "ALL" else clean_w.lower()
-                    else:
-                        _, s_win = _legacy_pool_and_window(s)
-                    if s_win == win.id or s_win == "ALL":
-                        matched_state = s
-                        if s_win == win.id:
-                            break
+            for state in pool_readings:
+                state_window = _observation_window(state)
+                if state_window == win.id:
+                    matched_state = state
+                    break
+                if state_window == "all" and matched_state is None:
+                    matched_state = state
+            reading_state = matched_state
+            if reading_state is None and not pool_has_probe:
+                # A probe measures one window at a time, so a missing probe
+                # window keeps the fail-closed evidence rule below.  An owner
+                # reading is the owner's statement about the whole pool: it
+                # still governs this window's red line (never its cost).
+                recorded = [
+                    state for state in pool_readings if _observation_window(state) != "all"
+                ]
+                known = [
+                    state for state in recorded if _observation_remaining(state) is not None
+                ]
+                if known:
+                    reading_state = min(
+                        known,
+                        key=lambda state: _observation_remaining(state) or 0.0,
+                    )
+                elif recorded:
+                    reading_state = recorded[0]
+            # Only a reading that describes this window carries a cost prior.
+            project_cost = matched_state is not None
 
             # Check overage rule
             if pool_pol.overage_possible:
                 is_stale_or_missing = False
-                if matched_state is None:
+                if reading_state is None:
                     is_stale_or_missing = True
                 else:
-                    freshness_status = str(getattr(matched_state, "freshness", "") or "").upper()
-                    rem_raw = getattr(matched_state, "normalized_remaining_pct", None)
-                    if rem_raw is None:
-                        rem_raw = getattr(matched_state, "remaining_percent", None)
-                    if freshness_status != "FRESH" or rem_raw is None:
+                    freshness_status = str(getattr(reading_state, "freshness", "") or "").upper()
+                    if freshness_status != "FRESH" or _observation_remaining(reading_state) is None:
                         is_stale_or_missing = True
 
                 if is_stale_or_missing:
@@ -820,20 +895,9 @@ def admit(
             # Compute remaining percent
             remaining: float | None = None
             reset_at_str: str | None = None
-            if matched_state is not None:
-                norm = getattr(matched_state, "normalized_remaining_pct", None)
-                try:
-                    remaining = (
-                        float(norm) if norm is not None
-                        else (
-                            float(matched_state.remaining_percent)
-                            if matched_state.remaining_percent is not None
-                            else None
-                        )
-                    )
-                except (TypeError, ValueError):
-                    remaining = None
-                reset_at_str = matched_state.reset_at
+            if reading_state is not None:
+                remaining = _observation_remaining(reading_state)
+                reset_at_str = reading_state.reset_at
 
             if remaining is None:
                 remaining = 100.0
@@ -848,9 +912,13 @@ def admit(
 
             remaining = max(0.0, remaining - prior_charges)
 
-            # Cost estimate
-            cost_pct = _get_cost_estimate(candidate, pool_id, win.id, size_bucket, cost_states)
-            projected_cost = cost_pct * multiplier
+            # Cost estimate, only for the window the reading describes
+            projected_cost = 0.0
+            if project_cost:
+                projected_cost = (
+                    _get_cost_estimate(candidate, pool_id, win.id, size_bucket, cost_states)
+                    * multiplier
+                )
 
             # Time-of-day reserve
             res_val = reserve_pct(pool_id, win.id, moment, effective_policy)
