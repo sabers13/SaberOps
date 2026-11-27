@@ -170,6 +170,7 @@ class RigEnvironment:
         repair_mode: str | None = None,
         advisor_questions: list[str] | None = None,
         advisor_log: Path | None = None,
+        advisor_delay_seconds: float | None = None,
     ) -> None:
         """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars.
 
@@ -204,6 +205,8 @@ class RigEnvironment:
             payload["advisor_questions"] = list(advisor_questions)
         if advisor_log is not None:
             payload["advisor_log"] = str(advisor_log)
+        if advisor_delay_seconds is not None:
+            payload["advisor_delay_seconds"] = advisor_delay_seconds
         if hang_seconds is not None:
             payload["hang_seconds"] = hang_seconds
         if exit_code is not None:

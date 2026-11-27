@@ -520,6 +520,20 @@ def _start_children_holder() -> None:
         time.sleep(0.02)
 
 
+def _delay_configured_advisor(prompt_text: str) -> None:
+    """Sleep when the test scripts a slow or hung advisor answer (ADR-0107).
+
+    ``advisor_delay_seconds`` in the control file applies only to an
+    ``[ADVISOR REQUEST]`` prompt, so a real worker turn keeps its own timing.
+    """
+    if not prompt_text.lstrip().startswith("[ADVISOR REQUEST]"):
+        return
+    control = _read_control_json(_worker_control_path())
+    delay = float(control.get("advisor_delay_seconds") or 0)
+    if delay > 0:
+        time.sleep(delay)
+
+
 def _ask_configured_advisor(prompt_text: str) -> None:
     """Run the worker-facing advisor command when the test asks it to.
 
@@ -617,6 +631,7 @@ def _handle_codex(
     if switched is not None:
         return switched
 
+    _delay_configured_advisor(prompt_text)
     _ask_configured_advisor(prompt_text)
     sandbox = _get_arg_value(args, "--sandbox")
     control = _read_control_json(_worker_control_path())

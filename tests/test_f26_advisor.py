@@ -22,7 +22,9 @@ from saberops.advisor import (
     ADVISOR_CALL_EVENT,
     ADVISOR_SKIPPED_EVENT,
     ADVISOR_UNAVAILABLE_EVENT,
+    DEFAULT_ADVISOR_TIMEOUT_SECONDS,
     AdvisorRefused,
+    advisor_route_path,
     advisor_view_for_job,
     ask_advisor,
     load_advisor_route,
@@ -392,6 +394,159 @@ def test_advisor_never_produces_a_commit(
         wt for wt in GitManager.list_worktrees(rig.repo) if "advisor-" in wt.path
     ]
     assert _git(rig.repo, "rev-parse", "main") == rig.base_sha
+
+
+def _advisor_run(rig: RigEnvironment) -> tuple[Any, str, str]:
+    """One run and attempt the advisor can answer about, without a dispatch."""
+    db = rig.db()
+    run_id = "run_h49_advisor"
+    attempt_id = "run_h49_advisor_a1"
+    db.create_run(
+        Run(
+            id=run_id,
+            task="h49 advisor budget",
+            target_repo=str(rig.repo),
+            base_commit=rig.base_sha,
+            tier=Tier.T1,
+            training_allowed=True,
+            gate_command=rig.gate_command,
+            status=RunStatus.RUNNING,
+            created_at=current_iso_timestamp(),
+        )
+    )
+    db.create_attempt(
+        Attempt(
+            id=attempt_id,
+            run_id=run_id,
+            attempt_number=1,
+            provider="codex",
+            model=ADVISOR_MODEL,
+            worktree_path=str(rig.repo),
+            branch_name="h49-advisor-budget",
+            status=AttemptStatus.RUNNING,
+            created_at=current_iso_timestamp(),
+            base_sha=rig.base_sha,
+        )
+    )
+    return db, run_id, attempt_id
+
+
+@pytest.mark.slow
+def test_h49_slow_advisor_answers_within_its_own_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An advisor turn past the old 120 s bound still answers (ADR-0107).
+
+    H37 saw a real advisor turn outlive 120 s and be reported as
+    ``ADVISOR_UNAVAILABLE: advisor call returned TIMEOUT``.  The advisor now
+    carries its own 600 s bound, so a 121 s fake turn is advice, not a timeout.
+    """
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    db, run_id, attempt_id = _advisor_run(rig)
+    rig.set_worker_mode("commit", report_text=ADVICE, advisor_delay_seconds=121)
+    set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL)
+
+    advice = ask_advisor(
+        db,
+        repo=rig.repo,
+        run_id=run_id,
+        registry=AdapterRegistry.default(),
+        attempt_id=attempt_id,
+        task="h49 advisor budget",
+        question=QUESTION,
+        base_sha=rig.base_sha,
+    )
+    assert advice.advice == ADVICE
+    recorded = db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT)
+    assert len(recorded) == 1
+
+
+def test_h49_hung_advisor_ends_naming_its_route_and_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung advisor still ends, and the refusal names the route and the bound."""
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    db, run_id, attempt_id = _advisor_run(rig)
+    rig.set_worker_mode("commit", report_text=ADVICE, advisor_delay_seconds=3600)
+    set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL, timeout_seconds=2)
+
+    with pytest.raises(AdvisorRefused) as refused:
+        ask_advisor(
+            db,
+            repo=rig.repo,
+            run_id=run_id,
+            registry=AdapterRegistry.default(),
+            attempt_id=attempt_id,
+            task="h49 advisor bound",
+            question=QUESTION,
+            base_sha=rig.base_sha,
+        )
+    assert refused.value.code == "ADVISOR_UNAVAILABLE"
+    expected = f"advisor route codex/{ADVISOR_MODEL} timed out after 2s"
+    assert expected in str(refused.value)
+    unavailable = db.get_events_by_type(run_id, ADVISOR_UNAVAILABLE_EVENT)
+    assert len(unavailable) == 1
+    payload = unavailable[0].payload or {}
+    assert payload["reason"] == expected
+    assert payload["route"] == f"codex/{ADVISOR_MODEL}"
+    assert payload["timeout_seconds"] == 2.0
+    assert db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT) == []
+
+
+def test_h49_route_timeout_is_configurable_and_old_documents_keep_working(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call bound is a route setting, and a pre-ADR-0107 document still reads."""
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    route = set_advisor_route(
+        rig.repo, provider="codex", model=ADVISOR_MODEL, timeout_seconds=90
+    )
+    assert route.timeout_seconds == 90.0
+    loaded = load_advisor_route(rig.repo)
+    assert loaded is not None and loaded.timeout_seconds == 90.0
+
+    # An older document (schema v1, written before the field existed) keeps
+    # working on the stated default, which is the bound the old code lacked.
+    path = advisor_route_path(rig.repo)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    del document["timeout_seconds"]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    old = load_advisor_route(rig.repo)
+    assert old is not None
+    assert old.timeout_seconds == DEFAULT_ADVISOR_TIMEOUT_SECONDS
+    assert old.timeout_seconds > 120.0
+
+    set_result = rig.run_cli(
+        "project",
+        "advisor",
+        "set",
+        "codex",
+        ADVISOR_MODEL,
+        "--timeout",
+        "45",
+        "--repo",
+        str(rig.repo),
+    )
+    assert set_result.returncode == 0, set_result.stderr
+    shown = json.loads(
+        rig.run_cli("project", "advisor", "show", "--repo", str(rig.repo), "--json").stdout
+    )
+    assert shown["timeout_seconds"] == 45.0
+    assert shown["route"]["timeout_seconds"] == 45.0
+
+    refused = rig.run_cli(
+        "project",
+        "advisor",
+        "set",
+        "codex",
+        ADVISOR_MODEL,
+        "--timeout",
+        "0",
+        "--repo",
+        str(rig.repo),
+    )
+    assert refused.returncode == 1
+    assert "timeout_seconds" in refused.stderr
 
 
 def test_cli_sets_shows_and_clears_the_advisor_route(

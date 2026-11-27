@@ -1,5 +1,5 @@
 {
-  "logic_lines": 180315,
+  "logic_lines": 180519,
   "suppression_comments": 374,
-  "reason": "H47 + H48 combined after rebase: resumed-job reconciliation (ADR-0105) and owner-reading windows (ADR-0106)"
+  "reason": "H49: the advisor's own per-call bound (ADR-0107) plus its slow, hung and document tests"
 }

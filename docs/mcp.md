@@ -297,15 +297,17 @@ never reached a worker; a delivered note stays as evidence.
 
 An optional advisor (ADR-0034) answers on demand rather than at fixed
 checkpoints. Set it per project with
-`orch project advisor set <provider> <model> [--calls N]` and turn it off with
-`orch project advisor off`; it is off by default. While it is on, a headless
-worker runs `orch advisor ask --question "..."` from its own worktree, and the
-planner (or a native worker) calls the `ask_advisor` MCP tool with the job and
-its question. The tool is **only registered while the session's project has a
-route**; off means no tool. The advisor reads a disposable worktree, returns
-bounded advice, and is bounded by the per-job budget (default 3). A call is
+`orch project advisor set <provider> <model> [--calls N] [--timeout SECONDS]`
+and turn it off with `orch project advisor off`; it is off by default. While it
+is on, a headless worker runs `orch advisor ask --question "..."` from its own
+worktree, and the planner (or a native worker) calls the `ask_advisor` MCP tool
+with the job and its question. The tool is **only registered while the session's
+project has a route**; off means no tool. The advisor reads a disposable
+worktree, returns bounded advice, and is bounded by the per-job budget
+(default 3) and its own per-call bound (default 600 s, ADR-0107). A call is
 refused with a reason when the route is off, the work gate is paused, or the
-budget is spent. Its route, call budget, calls and advice appear in the
+budget is spent; a call that outlasts its bound ends with a timeout that names
+the route and the bound. Its route, call budget, calls and advice appear in the
 `advisor` block of `get_job`, `tail_job` and `catch_up`, and its calls are
 counted in per-job usage.
 

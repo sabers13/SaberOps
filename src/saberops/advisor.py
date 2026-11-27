@@ -76,7 +76,14 @@ ADVISOR_SCHEMA_VERSION: Final[int] = 1
 DEFAULT_ADVISOR_CALL_BUDGET: Final[int] = 3
 MAX_ADVISOR_CALL_BUDGET: Final[int] = 20
 MAX_ADVICE_CHARS: Final[int] = 1200
-DEFAULT_ADVISOR_TIMEOUT_SECONDS: Final[float] = 120.0
+#: One advisor turn reads the task, the attempt record and a bounded diff, so it
+#: is a normal model turn: H37 saw a real one outlive 120 s.  The bound is five
+#: times that failure point and half the reviewer's 1200 s bound, so a hung
+#: advisor ends long before it holds a planner call as long as a review
+#: (ADR-0107).
+DEFAULT_ADVISOR_TIMEOUT_SECONDS: Final[float] = 600.0
+MIN_ADVISOR_TIMEOUT_SECONDS: Final[float] = 1.0
+MAX_ADVISOR_TIMEOUT_SECONDS: Final[float] = 3600.0
 _MAX_QUESTION_CHARS: Final[int] = 2000
 _MAX_RECENT_OUTPUT_CHARS: Final[int] = 2000
 _MAX_FAILING_CHECK_CHARS: Final[int] = 1500
@@ -116,6 +123,7 @@ class AdvisorRoute:
     provider: str
     model: str
     call_budget: int = DEFAULT_ADVISOR_CALL_BUDGET
+    timeout_seconds: float = DEFAULT_ADVISOR_TIMEOUT_SECONDS
 
     @property
     def route_id(self) -> str:
@@ -127,6 +135,7 @@ class AdvisorRoute:
             "model": self.model,
             "route": self.route_id,
             "call_budget": self.call_budget,
+            "timeout_seconds": self.timeout_seconds,
         }
 
 
@@ -178,6 +187,18 @@ def advisor_route_path(repo: Path | str) -> Path:
     return _project_state_dir(repo, create=False) / ADVISOR_FILENAME
 
 
+def _coerce_timeout(value: object, source: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AdvisorConfigError(f"{source}: timeout_seconds must be a number of seconds")
+    timeout = float(value)
+    if not (MIN_ADVISOR_TIMEOUT_SECONDS <= timeout <= MAX_ADVISOR_TIMEOUT_SECONDS):
+        raise AdvisorConfigError(
+            f"{source}: timeout_seconds must be between "
+            f"{MIN_ADVISOR_TIMEOUT_SECONDS:g} and {MAX_ADVISOR_TIMEOUT_SECONDS:g}"
+        )
+    return timeout
+
+
 def _coerce_route(data: object, source: str) -> AdvisorRoute | None:
     if not isinstance(data, dict):
         raise AdvisorConfigError(f"advisor route at {source}: payload must be a JSON object")
@@ -201,7 +222,18 @@ def _coerce_route(data: object, source: str) -> AdvisorRoute | None:
             f"advisor route at {source}: call_budget must be an integer between "
             f"1 and {MAX_ADVISOR_CALL_BUDGET}"
         )
-    return AdvisorRoute(provider=provider, model=model, call_budget=raw_budget)
+    # A document written before ADR-0107 has no timeout_seconds: it keeps
+    # working on the stated default (expand, never break an old document).
+    timeout = _coerce_timeout(
+        data.get("timeout_seconds", DEFAULT_ADVISOR_TIMEOUT_SECONDS),
+        f"advisor route at {source}",
+    )
+    return AdvisorRoute(
+        provider=provider,
+        model=model,
+        call_budget=raw_budget,
+        timeout_seconds=timeout,
+    )
 
 
 def load_advisor_route(repo: Path | str) -> AdvisorRoute | None:
@@ -245,6 +277,7 @@ def set_advisor_route(
     provider: str,
     model: str,
     call_budget: int = DEFAULT_ADVISOR_CALL_BUDGET,
+    timeout_seconds: float = DEFAULT_ADVISOR_TIMEOUT_SECONDS,
 ) -> AdvisorRoute:
     """Persist one advisor route for the project (owner action, CLI/agent)."""
     clean_provider = (provider or "").strip().lower()
@@ -255,7 +288,13 @@ def set_advisor_route(
         raise AdvisorConfigError(
             f"advisor call budget must be an integer between 1 and {MAX_ADVISOR_CALL_BUDGET}"
         )
-    route = AdvisorRoute(provider=clean_provider, model=clean_model, call_budget=call_budget)
+    timeout = _coerce_timeout(timeout_seconds, "advisor timeout")
+    route = AdvisorRoute(
+        provider=clean_provider,
+        model=clean_model,
+        call_budget=call_budget,
+        timeout_seconds=timeout,
+    )
     path = _project_state_dir(repo, create=True) / ADVISOR_FILENAME
     _atomic_write(
         path,
@@ -515,12 +554,12 @@ def _record_event(db: Any, run_id: str, event_type: str,
         _LOG.warning("could not record %s: %s", event_type, exc)
 
 
-def _refusal_payload(route: AdvisorRoute, reason: str, **extra: Any) -> dict[str, Any]:
+def _refusal_payload(advisor: AdvisorRoute, reason: str, **extra: Any) -> dict[str, Any]:
     return {
         "checkpoint": ADVISOR_CHECKPOINT_ON_DEMAND,
         "reason": reason,
-        "provider": route.provider,
-        "model": route.model,
+        "provider": advisor.provider,
+        "model": advisor.model,
         **extra,
     }
 
@@ -538,7 +577,6 @@ def ask_advisor(
     attempts: Sequence[Attempt] = (),
     base_sha: str,
     prior_worktree: Path | str | None = None,
-    timeout_seconds: float = DEFAULT_ADVISOR_TIMEOUT_SECONDS,
 ) -> AdvisorAdvice:
     """Ask the configured advisor once; refuse with a reason when it cannot run.
 
@@ -661,7 +699,7 @@ def ask_advisor(
                 task=prompt,
                 worktree_path=scratch,
                 model=route.model,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=route.timeout_seconds,
                 read_only=True,
             )
         )
@@ -690,7 +728,21 @@ def ask_advisor(
     )
     status = getattr(result, "status", None)
     if status is not AttemptStatus.SUCCESS:
-        reason = f"advisor call returned {getattr(status, 'value', status)}"
+        extra: dict[str, Any] = {}
+        if status is AttemptStatus.TIMEOUT:
+            # Name the route and the bound, not just "TIMEOUT": that is what
+            # tells the owner which advisor and how long to change (ADR-0107).
+            reason = (
+                f"advisor route {route.route_id} timed out after "
+                f"{route.timeout_seconds:g}s"
+            )
+            extra = {
+                "route": route.route_id,
+                "timeout_seconds": route.timeout_seconds,
+                "duration_seconds": getattr(result, "duration_seconds", None),
+            }
+        else:
+            reason = f"advisor call returned {getattr(status, 'value', status)}"
         _record_event(
             db,
             run_id,
@@ -700,6 +752,7 @@ def ask_advisor(
                 route,
                 reason,
                 detail=_bounded(getattr(result, "error", None), 300),
+                **extra,
             ),
         )
         raise AdvisorRefused("ADVISOR_UNAVAILABLE", reason)

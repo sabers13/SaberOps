@@ -2847,6 +2847,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Per-job advisor call budget (default 3).",
     )
+    project_advisor_set.add_argument(
+        "--timeout",
+        dest="advisor_timeout",
+        type=float,
+        default=None,
+        help="Per-call advisor timeout in seconds (default 600).",
+    )
     _add_json_arg(project_advisor_set)
     project_advisor_off = project_advisor_sub.add_parser(
         "off",
@@ -6017,6 +6024,7 @@ def handle_project_advisor_show(args: argparse.Namespace) -> int:
         "enabled": route is not None,
         "route": route.as_dict() if route is not None else None,
         "call_budget": route.call_budget if route is not None else None,
+        "timeout_seconds": route.timeout_seconds if route is not None else None,
     }
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -6024,13 +6032,17 @@ def handle_project_advisor_show(args: argparse.Namespace) -> int:
     if route is None:
         print("Advisor: off (the default)")
         return 0
-    print(f"Advisor: {route.route_id} (up to {route.call_budget} calls per job)")
+    print(
+        f"Advisor: {route.route_id} (up to {route.call_budget} calls per job, "
+        f"{route.timeout_seconds:g}s per call)"
+    )
     return 0
 
 
 def handle_project_advisor_set(args: argparse.Namespace) -> int:
     """Handle ``orch project advisor set PROVIDER MODEL``."""
     from saberops.advisor import (
+        DEFAULT_ADVISOR_TIMEOUT_SECONDS,
         PLAN_ROUTE_PROVIDERS,
         AdvisorConfigError,
         set_advisor_route,
@@ -6054,6 +6066,11 @@ def handle_project_advisor_set(args: argparse.Namespace) -> int:
             provider=provider,
             model=str(getattr(args, "model", "") or ""),
             call_budget=int(getattr(args, "advisor_calls", 3)),
+            timeout_seconds=(
+                DEFAULT_ADVISOR_TIMEOUT_SECONDS
+                if getattr(args, "advisor_timeout", None) is None
+                else float(args.advisor_timeout)
+            ),
         )
     except (OSError, AdvisorConfigError) as exc:
         print(f"[!] {exc}", file=sys.stderr)
@@ -6061,7 +6078,10 @@ def handle_project_advisor_set(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         print(json.dumps(route.as_dict(), indent=2, sort_keys=True))
         return 0
-    print(f"Advisor set to {route.route_id} (up to {route.call_budget} calls per job)")
+    print(
+        f"Advisor set to {route.route_id} (up to {route.call_budget} calls per job, "
+        f"{route.timeout_seconds:g}s per call)"
+    )
     return 0
 
 
