@@ -46,7 +46,14 @@ from saberops.jobs.store import (
     JobNotFoundError,
     JobTransitionError,
 )
-from saberops.models import AttemptStatus, DispatchStage, HealthState, ManagerState, RunStatus
+from saberops.models import (
+    AttemptStatus,
+    DispatchStage,
+    HealthState,
+    ManagerState,
+    ReviewVerdict,
+    RunStatus,
+)
 from saberops.routing_config import RoutingSnapshot, load_effective_routing
 from saberops.run_creation import RunRequest
 
@@ -79,6 +86,7 @@ __all__ = [
     "redirect_job",
     "requeue",
     "requeue_preemption",
+    "review_refusal_view",
     "settle_preemption_debts",
     "set_waiting",
     "steering_notes",
@@ -1504,6 +1512,101 @@ def job_usage_view(db: Any, job: Job) -> dict[str, Any]:
     }
 
 
+def review_refusal_view(db: Any, job: Job) -> dict[str, Any] | None:
+    """Why the last independent review refused to run, and the owner's next action.
+
+    A refusal (``REVIEW_UNAVAILABLE`` or ``REVIEW_EXECUTION_FAILED``) fails the
+    run closed, and the run summary names only the verdict.  H37's D9: the
+    planner saw a ``wait_job`` timeout while the candidate already said the
+    review was unavailable, and the owner had to read the database for the
+    cause.  The reason and the action come from durable review rows and skip
+    events, so ``wait_job``, ``get_job`` and the status projection state the
+    same fact.
+    """
+    run_id = job.current_run_id or (job.run_ids[-1] if job.run_ids else None)
+    if run_id is None:
+        return None
+    reviews = db.get_reviews_for_run(run_id)
+    if not reviews:
+        return None
+    review = reviews[-1]
+    if review.verdict not in (
+        ReviewVerdict.REVIEW_UNAVAILABLE,
+        ReviewVerdict.REVIEW_EXECUTION_FAILED,
+    ):
+        return None
+    try:
+        skips = db.get_events_by_type(run_id, "review_candidate_skipped")
+    except Exception:  # noqa: BLE001 - routes are evidence, never a status break
+        skips = []
+    skip_reasons: list[str] = []
+    routes: list[str] = []
+    for event in skips:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        reason = str(payload.get("reason") or "")
+        skip_reasons.append(reason)
+        provider = payload.get("provider")
+        model = payload.get("model")
+        if provider and model:
+            routes.append(f"{provider}/{model} ({reason or 'skipped'})")
+    texts = f"{review.summary} {review.details or ''}".lower()
+    independence_refusals = {"same_model_as_worker", "model_family_excluded"}
+    if (
+        any(
+            reason in {"quota_blocked", "QUOTA_EVIDENCE_REQUIRED"}
+            for reason in skip_reasons
+        )
+        or "quota" in texts
+    ):
+        reason_kind = "quota"
+        action = (
+            "Record fresh reviewer quota evidence (`orch quota set <provider> "
+            "<pool> --remaining <percent>`) or pick a reviewer with room, then "
+            "resume with resume_job from='last_candidate'."
+        )
+    elif review.verdict is ReviewVerdict.REVIEW_EXECUTION_FAILED and "timeout" in texts:
+        reason_kind = "timeout"
+        action = (
+            "The reviewer timed out; resume_job from='last_candidate' retries "
+            "the review on the saved candidate."
+        )
+    elif review.verdict is ReviewVerdict.REVIEW_UNAVAILABLE and (
+        not skip_reasons or set(skip_reasons) <= independence_refusals
+    ):
+        reason_kind = "no_independent_reviewer"
+        action = (
+            "No eligible independent reviewer ran. Select one with "
+            "`orch reviewer select <binding>` (or add a review route), then "
+            "resume with resume_job from='last_candidate'."
+        )
+    elif review.verdict is ReviewVerdict.REVIEW_UNAVAILABLE:
+        reason_kind = "unavailable"
+        action = (
+            "The reviewer route could not run this review. Check it with "
+            "`orch preflight`, then resume with resume_job "
+            "from='last_candidate'."
+        )
+    else:
+        reason_kind = "execution_failed"
+        action = (
+            "The reviewer produced no usable verdict; resume_job "
+            "from='last_candidate' retries the review on the saved candidate."
+        )
+    detail = f"Review {review.verdict.value}: {reason_kind}"
+    if routes:
+        detail += " — reviewer routes tried: " + "; ".join(routes)
+    elif review.details:
+        detail += f" — {review.details.strip()}"
+    else:
+        detail += f" — {review.summary}"
+    return {
+        "verdict": review.verdict.value,
+        "reason": reason_kind,
+        "detail": detail + ".",
+        "next_action": action,
+    }
+
+
 def _stall_attention_evidence(db: Any, run_id: str | None) -> bool:
     """True when a durable output-quiet stall is the latest attention signal.
 
@@ -1531,6 +1634,8 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
     """Project durable execution evidence onto a job without changing its state."""
     view = job.to_dict()
     view.update(activity=None, reason=None, work_location=None, last_failed_attempt=None)
+    refusal = review_refusal_view(db, job)
+    view["review"] = refusal
     from saberops.observability.run_report import build_roles_view
 
     try:
@@ -1610,6 +1715,8 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
         return view
     if run is not None:
         view["reason"] = run.result_summary
+        if view["reason"] and refusal is not None:
+            view["reason"] = f"{view['reason']} {refusal['detail']}"
     if job.state != JobState.RUNNING:
         if not view["reason"]:
             view["reason"] = job.failure_reason or (

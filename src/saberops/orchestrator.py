@@ -6929,10 +6929,18 @@ class Orchestrator:
                                 # publication + candidate-ready transition.
                                 pass
                             else:
+                                refused_review = reviews[-1] if reviews else None
+                                refused_detail = (
+                                    (refused_review.details or "").strip()
+                                    if refused_review is not None
+                                    else ""
+                                )
                                 review_fail_summary = (
                                     "Required independent review did not approve "
                                     f"candidate {current_commit_sha}: terminal verdict "
-                                    f"{review_terminal.value}. Failing closed with no "
+                                    f"{review_terminal.value}. "
+                                    f"{f'Reason: {refused_detail} ' if refused_detail else ''}"
+                                    "Failing closed with no "
                                     "candidate publication, no candidate-ready transition, "
                                     "and no acceptance."
                                 )

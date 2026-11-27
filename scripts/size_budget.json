@@ -1,5 +1,5 @@
 {
-  "logic_lines": 180559,
-  "suppression_comments": 374,
-  "reason": "H48: a launch failure never teaches a memory peak, plus its regression test"
+  "logic_lines": 180833,
+  "suppression_comments": 375,
+  "reason": "H48 launch-peak fix + H49 advisor bound + H51 review-refusal projection after rebase (ADR-0105/0107/0109)"
 }

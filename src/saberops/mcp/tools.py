@@ -631,6 +631,15 @@ def _submit_plan(context: ServerContext, arguments: Mapping[str, Any]) -> dict[s
 def _job_guidance(job: Any, db: Any | None = None) -> str | None:
     from saberops.jobs.models import WaitingReason
 
+    if db is not None:
+        from saberops.jobs.service import review_refusal_view
+
+        refusal = review_refusal_view(db, job)
+        if refusal is not None:
+            # A refused independent review fails closed; retrying blind is the
+            # wrong move, so name the cause and the exact next action (D9).
+            return f"{refusal['detail']} {refusal['next_action']}"
+
     if job.failure_reason == "NO_ROUTE_FOR_REQUIREMENTS":
         if job.requirements.role.value != "BUILD":
             return "Only BUILD jobs dispatch; set requirements.role to BUILD."
@@ -735,7 +744,11 @@ def _chosen_worker(db: Any, job: Any) -> dict[str, Any] | None:
 
 def _job_result(db: Any, job: Any) -> dict[str, Any]:
     """Read-only result projection, reusable by completion tools."""
-    from saberops.jobs.service import job_usage_view, owner_action_view
+    from saberops.jobs.service import (
+        job_usage_view,
+        owner_action_view,
+        review_refusal_view,
+    )
     from saberops.scout import latest_report
 
     report: dict[str, Any] | None = None
@@ -752,6 +765,7 @@ def _job_result(db: Any, job: Any) -> dict[str, Any]:
         "owner_action": owner_view["owner_action"],
         "worker": _chosen_worker(db, job),
         "report": report,
+        "review": review_refusal_view(db, job),
         "usage": job_usage_view(db, job),
     }
     if owner_view["candidate_sha"] is not None:
