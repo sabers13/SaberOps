@@ -1640,7 +1640,13 @@ def run_with_lease(
             last_oom = oom_kill
             if observed_peak > best_peak:
                 best_peak = observed_peak
-            if record_peak and observed_peak > 0:
+            # A launch failure never ran the target: the scope's peak measures
+            # only the launcher wrapper (a few MB).  Learning it would collapse
+            # the next grant for this step to that floor, and the following
+            # real step is then throttled inside the tiny ceiling until its own
+            # wall-clock budget expires (reported as -1) instead of reporting
+            # its exit code.
+            if record_peak and observed_peak > 0 and not launch_failed:
                 ledger.record_peak(
                     step,
                     size_bucket,

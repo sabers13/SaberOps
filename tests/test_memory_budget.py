@@ -681,6 +681,63 @@ def test_scoped_launch_failure_propagates_without_masking_exit_127(
     assert res_real_127.exit_code == 127
 
 
+def test_launch_failure_peak_is_not_learned(tmp_path: Path) -> None:
+    """A launch failure only measured the launcher; it must not teach a peak.
+
+    ``build_cgroup_scope_prefix`` starts the target through a launcher python
+    inside the scope and records the scope's ``memory.peak`` even when the
+    target could not be exec'd.  That peak is the launcher alone (a few MB).
+    Learning it collapses the step's prediction to that floor, so the next real
+    step runs inside a ceiling it cannot fit and is throttled until its own
+    wall-clock budget expires (-1) instead of reporting its exit code.
+    """
+    ledger = gt.MemoryLedger(
+        tmp_path / "ledger",
+        reserve_bytes=0,
+        available_memory_fn=lambda: 8 * gt.GB,
+        pressure_fn=lambda: gt.MemoryPressure(0.0, 0.0),
+    )
+    wrapper_peak = 6 * gt.MIB
+
+    def failed_scope(_grant: int, _unit: str, meta: Path) -> list[str]:
+        (meta / "memory.peak").write_text(str(wrapper_peak), encoding="utf-8")
+        (meta / "launch_failed").write_text("PermissionError", encoding="utf-8")
+        return []
+
+    _, failed = gt.run_with_lease(
+        ledger=ledger,
+        step="configured-gate",
+        size_bucket="default",
+        invoke=lambda _c, _e, _g, _w: (-1, False, False, 0),
+        cmd=["/nonexistent/target"],
+        scope_prefix_fn=failed_scope,
+        notify=lambda _m: None,
+    )
+    assert failed.launch_failed is True
+    assert failed.measured_peak_bytes == wrapper_peak
+    # The wrapper measurement stays evidence; it is never the learned size.
+    assert ledger.predict_peak("configured-gate", "default") == gt.COLD_START_PEAK_BYTES
+    with ledger.acquire("configured-gate", "default", wait=0.0) as lease:
+        assert lease.grant_bytes == gt.COLD_START_PEAK_BYTES
+
+    # A target that really ran still teaches its measured peak.
+    def ran_scope(_grant: int, _unit: str, meta: Path) -> list[str]:
+        (meta / "memory.peak").write_text(str(700 * gt.MIB), encoding="utf-8")
+        return []
+
+    _, ran = gt.run_with_lease(
+        ledger=ledger,
+        step="configured-gate",
+        size_bucket="default",
+        invoke=lambda _c, _e, _g, _w: (0, False, False, 0),
+        cmd=["true"],
+        scope_prefix_fn=ran_scope,
+        notify=lambda _m: None,
+    )
+    assert ran.launch_failed is False
+    assert ledger.predict_peak("configured-gate", "default") == 700 * gt.MIB
+
+
 def test_parallel_step_grant_does_not_collapse_to_one_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
