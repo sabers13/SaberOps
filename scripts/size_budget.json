@@ -1,5 +1,5 @@
 {
-  "logic_lines": 180073,
+  "logic_lines": 180315,
   "suppression_comments": 374,
-  "reason": "H47: resumed successor carries its job; terminal runs reconcile; released-owner cancel (ADR-0105)"
+  "reason": "H47 + H48 combined after rebase: resumed-job reconciliation (ADR-0105) and owner-reading windows (ADR-0106)"
 }
