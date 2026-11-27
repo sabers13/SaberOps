@@ -36,6 +36,8 @@ def streaming_process_kwargs(request: WorkerRequest) -> dict[str, Any]:
         kwargs["on_process_start"] = request.on_process_start
     if request.on_monitor_transition is not None:
         kwargs["on_monitor_transition"] = request.on_monitor_transition
+    if request.on_process_sample is not None:
+        kwargs["on_process_sample"] = request.on_process_sample
     return kwargs
 
 

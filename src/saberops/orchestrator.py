@@ -81,6 +81,7 @@ from saberops.job_evidence import (
     record_attempt_result,
     record_request,
 )
+from saberops.job_processes import JobProcessRecorder
 from saberops.jobs.models import Effort, JobRole
 from saberops.models import (
     Attempt,
@@ -768,6 +769,10 @@ class Orchestrator:
         # (automatic UNKNOWN skip) when it is not.  A missing/broken
         # authority must never resolve to this disabled state.
         self.readiness_service = readiness_service
+
+    def _job_process_recorder(self, run_id: str, attempt_id: str) -> JobProcessRecorder:
+        """Build the observation-only process/port recorder for one attempt."""
+        return JobProcessRecorder(self.db, run_id=run_id, attempt_id=attempt_id)
 
     def _bound_adapter_run(
         self,
@@ -3978,7 +3983,11 @@ class Orchestrator:
                 )
 
                 def _on_worker_start(
-                    run_id: str, att_id: str, att_num: int, db: Database
+                    run_id: str,
+                    att_id: str,
+                    att_num: int,
+                    db: Database,
+                    recorder: JobProcessRecorder,
                 ) -> Callable[[dict[str, Any]], None]:
                     """Build a non-fatal callback that persists real worker process identity.
 
@@ -3986,7 +3995,8 @@ class Orchestrator:
                     worker_identity are updated, never provider/model/deadline.
                     Process identity must be persisted before the worker is
                     considered safely cancellable.  If persistence fails,
-                    no PID fence is invented.
+                    no PID fence is invented.  The same identity starts the
+                    per-job process/port recorder (ADR-0100).
                     """
 
                     def _callback(
@@ -4011,10 +4021,21 @@ class Orchestrator:
                             )
                         except Exception:
                             pass
+                        try:
+                            from saberops.ownership import ProcessIdentity
+
+                            identity = ProcessIdentity.from_dict(identity_dict)
+                            if identity is not None:
+                                recorder.attach_identity(identity)
+                        except Exception:
+                            pass
 
                     return _callback
 
-                on_process_start = _on_worker_start(run_id, attempt_id, attempt_number, self.db)
+                process_recorder = self._job_process_recorder(run_id, attempt_id)
+                on_process_start = _on_worker_start(
+                    run_id, attempt_id, attempt_number, self.db, process_recorder
+                )
 
                 on_stdout, on_stderr, on_stall, on_resume = self._worker_activity_hooks(
                     run_id, attempt_id, candidate.provider, candidate.model
@@ -4044,6 +4065,7 @@ class Orchestrator:
                     on_resume=on_resume,
                     on_process_start=on_process_start,
                     on_monitor_transition=on_monitor_transition,
+                    on_process_sample=process_recorder.sample,
                     reasoning_effort=worker_effort,
                     # Run-scoped identity (ORCH_RUN_ID/ORCH_DB_PATH) is
                     # always provided so deterministic scope expansion works
@@ -4220,15 +4242,21 @@ class Orchestrator:
                         outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                     )
                 else:
-                    worker_res = self._bound_adapter_run(
-                        adapter,
-                        autonomous=autonomous,
-                        attempt_id=attempt_id,
-                        run_id=run_id,
-                        repo_root=str(wt_path),
-                        provider=candidate.provider,
-                        model=candidate.model,
-                    )(worker_req)
+                    try:
+                        worker_res = self._bound_adapter_run(
+                            adapter,
+                            autonomous=autonomous,
+                            attempt_id=attempt_id,
+                            run_id=run_id,
+                            repo_root=str(wt_path),
+                            provider=candidate.provider,
+                            model=candidate.model,
+                        )(worker_req)
+                    finally:
+                        # The observation-only leftovers verdict is taken once
+                        # the worker process group has ended (ADR-0100): report,
+                        # never kill.
+                        process_recorder.finish()
                 assert worker_res is not None
                 if (
                     worker_res.status is AttemptStatus.SUCCESS
@@ -5371,6 +5399,7 @@ class Orchestrator:
                                         att_id: str,
                                         att_num: int,
                                         db: Database,
+                                        recorder: JobProcessRecorder,
                                     ) -> Callable[[dict[str, Any]], None]:
                                         def _cb(identity_dict: dict[str, Any]) -> None:
                                             try:
@@ -5394,11 +5423,28 @@ class Orchestrator:
                                                 )
                                             except Exception:
                                                 pass
+                                            try:
+                                                from saberops.ownership import ProcessIdentity
+
+                                                identity = ProcessIdentity.from_dict(
+                                                    identity_dict
+                                                )
+                                                if identity is not None:
+                                                    recorder.attach_identity(identity)
+                                            except Exception:
+                                                pass
 
                                         return _cb
 
+                                    repair_process_recorder = self._job_process_recorder(
+                                        run_id, local_attempt_id
+                                    )
                                     r_on_process_start = _rep_on_worker_start(
-                                        run_id, local_attempt_id, attempt_number, self.db
+                                        run_id,
+                                        local_attempt_id,
+                                        attempt_number,
+                                        self.db,
+                                        repair_process_recorder,
                                     )
 
                                     r_on_stdout, r_on_stderr, r_on_stall, r_on_resume = (
@@ -5421,6 +5467,7 @@ class Orchestrator:
                                         on_resume=r_on_resume,
                                         on_process_start=r_on_process_start,
                                         on_monitor_transition=r_on_monitor_transition,
+                                        on_process_sample=repair_process_recorder.sample,
                                         reasoning_effort=(
                                             repair_resolved.reasoning_effort
                                             if repair_resolved is not None
@@ -5619,15 +5666,18 @@ class Orchestrator:
                                             outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                                         )
                                     else:
-                                        w_res = self._bound_adapter_run(
-                                            cur_adapter,
-                                            autonomous=autonomous,
-                                            attempt_id=local_attempt_id,
-                                            run_id=run_id,
-                                            repo_root=str(local_wt_path),
-                                            provider=cand_provider,
-                                            model=cand_model,
-                                        )(w_req)
+                                        try:
+                                            w_res = self._bound_adapter_run(
+                                                cur_adapter,
+                                                autonomous=autonomous,
+                                                attempt_id=local_attempt_id,
+                                                run_id=run_id,
+                                                repo_root=str(local_wt_path),
+                                                provider=cand_provider,
+                                                model=cand_model,
+                                            )(w_req)
+                                        finally:
+                                            repair_process_recorder.finish()
                                     assert w_res is not None
                                     if (
                                         w_res.status is AttemptStatus.SUCCESS

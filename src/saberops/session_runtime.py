@@ -287,6 +287,7 @@ class AgentSessionRuntime:
                     on_stderr=output,
                     on_process_start=request.on_process_start,
                     on_monitor_transition=self.monitor_transition,
+                    on_process_sample=request.on_process_sample,
                 )
             except BaseException as exc:
                 self.failure = exc

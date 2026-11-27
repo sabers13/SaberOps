@@ -420,6 +420,11 @@ def _run_failure_switch(
             if interval > 0:
                 time.sleep(interval)
         return None
+    if mode == "children":
+        # ADR-0100 drill: one long-lived child holding a listener, which leaves
+        # the process group before this worker exits.
+        _start_children_holder()
+        return None
     if mode == "hang":
         time.sleep(hang_seconds)
         return 0
@@ -482,6 +487,37 @@ def _run_failure_switch(
             )
         return 1
     return None
+
+
+def _start_children_holder() -> None:
+    """Start the ADR-0100 drill's listener and wait until it leaves the group."""
+    control = _read_control_json(_worker_control_path())
+    port_file = os.environ.get("ORCH_FAKE_WORKER_PORT_FILE") or str(
+        control.get("port_file") or ""
+    )
+    detach_file = os.environ.get("ORCH_FAKE_WORKER_DETACH_FILE") or str(
+        control.get("detach_file") or ""
+    )
+    pid_file = os.environ.get("ORCH_FAKE_WORKER_HOLDER_PID_FILE") or str(
+        control.get("holder_pid_file") or ""
+    )
+    if not (port_file and detach_file and pid_file):
+        return
+    holder = Path(__file__).with_name("port_holder.py")
+    subprocess.Popen(
+        [sys.executable, str(holder), port_file, detach_file, pid_file],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    timeout = float(
+        os.environ.get("ORCH_FAKE_WORKER_CHILD_TIMEOUT")
+        or control.get("child_timeout_seconds", 120)
+    )
+    deadline = time.monotonic() + timeout
+    while not Path(detach_file).exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
 
 
 def _ask_configured_advisor(prompt_text: str) -> None:

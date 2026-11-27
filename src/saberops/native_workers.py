@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from saberops.db import current_iso_timestamp
 from saberops.git import GitManager
+from saberops.job_processes import record_native_worker_not_observable
 from saberops.jobs import store as job_store
 from saberops.jobs.models import RUN_FAILED, Job, JobState
 from saberops.models import Attempt, AttemptStatus, CheckResult, Run, RunStatus
@@ -1124,6 +1125,11 @@ def record_native_attempt(
         },
     )
     job_store.reconcile_transition(db, job_id, to=JobState.SUCCEEDED)
+    try:
+        record_native_worker_not_observable(db, run_id=run_id, attempt_id=attempt_id)
+    except Exception:
+        # Evidence only; a write failure must not reject a valid report.
+        pass
     return {
         "job_id": job_id,
         "run_id": run_id,
@@ -1188,5 +1194,9 @@ def _fail_native(
         pass
     try:
         job_store.reconcile_transition(db, job_id, to=JobState.FAILED, failure_reason=RUN_FAILED)
+    except Exception:
+        pass
+    try:
+        record_native_worker_not_observable(db, run_id=run_id, attempt_id=attempt_id)
     except Exception:
         pass

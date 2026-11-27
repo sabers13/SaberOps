@@ -1097,6 +1097,12 @@ class WorkerRequest:
     # Owner-provided visual reference inputs; execution authority is unchanged.
     input_images: tuple[Path, ...] = ()
 
+    # Non-fatal callback invoked once per streaming wait-loop iteration so the
+    # caller can sample the live process tree (the per-job process and port
+    # inventory).  Throttling is the callback's own responsibility; a failure
+    # must never abort the worker.  The blocking path never calls it.
+    on_process_sample: Callable[[], None] | None = None
+
 
 @dataclass
 class WorkerResult:

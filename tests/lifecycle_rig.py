@@ -143,7 +143,13 @@ class RigEnvironment:
     def set_worker_mode(
         self,
         mode: Literal[
-            "commit", "hang", "crash", "quota_exhausted", "live", "partial_quota"
+            "commit",
+            "hang",
+            "crash",
+            "quota_exhausted",
+            "live",
+            "partial_quota",
+            "children",
         ],
         *,
         hang_seconds: float | None = None,

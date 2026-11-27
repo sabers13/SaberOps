@@ -518,6 +518,52 @@ class Database:
                     release_reason TEXT,
                     cancel_agent_json TEXT
                 );
+                -- ADR-0100: what one attempt's process group was observed to
+                -- start.  Keyed by the fenced worker identity (host, boot id,
+                -- pid, start ticks) plus run and attempt; the job is resolved
+                -- through the existing job-to-run map, so no job id column is
+                -- added here.  Observation only: leftovers are never killed.
+                CREATE TABLE IF NOT EXISTS job_processes (
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    attempt_id TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    boot_id TEXT,
+                    pgid INTEGER NOT NULL,
+                    pid INTEGER NOT NULL,
+                    start_ticks INTEGER NOT NULL,
+                    comm TEXT,
+                    is_leader INTEGER NOT NULL DEFAULT 0,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, attempt_id, pid, start_ticks)
+                );
+                CREATE TABLE IF NOT EXISTS job_ports (
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    attempt_id TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    boot_id TEXT,
+                    pgid INTEGER NOT NULL,
+                    protocol TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    inode INTEGER NOT NULL,
+                    address TEXT,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, attempt_id, protocol, port, inode)
+                );
+                CREATE TABLE IF NOT EXISTS job_leftovers (
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    attempt_id TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    detail_json TEXT NOT NULL DEFAULT '{}',
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, attempt_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_job_processes_run
+                    ON job_processes(run_id);
+                CREATE INDEX IF NOT EXISTS idx_job_ports_run
+                    ON job_ports(run_id);
+
                 CREATE TABLE IF NOT EXISTS handoffs (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -3504,9 +3550,206 @@ class Database:
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Per-job process and port evidence (ADR-0100)
+    #
+    # Observation only: these rows say what an attempt's process group was
+    # seen to start and what was still running or listening when it ended.
+    # Nothing here can signal, stop or clean up a process.
+    # ------------------------------------------------------------------
+
+    def upsert_job_process(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        host: str,
+        boot_id: str | None,
+        pgid: int,
+        pid: int,
+        start_ticks: int,
+        comm: str | None,
+        is_leader: bool,
+        seen_at: str,
+    ) -> None:
+        """Record one observed group member, updating its last-seen time."""
+        with self.write_transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO job_processes (
+                    run_id, attempt_id, host, boot_id, pgid, pid, start_ticks,
+                    comm, is_leader, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (run_id, attempt_id, pid, start_ticks)
+                DO UPDATE SET
+                    comm = excluded.comm,
+                    is_leader = excluded.is_leader,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    run_id,
+                    attempt_id,
+                    host,
+                    boot_id,
+                    pgid,
+                    pid,
+                    start_ticks,
+                    comm,
+                    1 if is_leader else 0,
+                    seen_at,
+                    seen_at,
+                ),
+            )
+            conn.commit()
+
+    def upsert_job_port(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        host: str,
+        boot_id: str | None,
+        pgid: int,
+        protocol: str,
+        port: int,
+        inode: int,
+        address: str | None,
+        seen_at: str,
+    ) -> None:
+        """Record one observed listening socket, updating its last-seen time."""
+        with self.write_transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO job_ports (
+                    run_id, attempt_id, host, boot_id, pgid, protocol, port,
+                    inode, address, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (run_id, attempt_id, protocol, port, inode)
+                DO UPDATE SET
+                    address = excluded.address,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    run_id,
+                    attempt_id,
+                    host,
+                    boot_id,
+                    pgid,
+                    protocol,
+                    port,
+                    inode,
+                    address,
+                    seen_at,
+                    seen_at,
+                ),
+            )
+            conn.commit()
+
+    def record_job_leftovers(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        verdict: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist the attempt-end leftovers verdict (one row per attempt)."""
+        with self.write_transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO job_leftovers (
+                    run_id, attempt_id, verdict, detail_json, recorded_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (run_id, attempt_id)
+                DO UPDATE SET
+                    verdict = excluded.verdict,
+                    detail_json = excluded.detail_json,
+                    recorded_at = excluded.recorded_at
+                """,
+                (
+                    run_id,
+                    attempt_id,
+                    verdict,
+                    json.dumps(detail or {}, sort_keys=True),
+                    current_iso_timestamp(),
+                ),
+            )
+            conn.commit()
+
+    def get_job_processes(self, run_id: str) -> list[dict[str, Any]]:
+        """Return every observed group member for one run, oldest first.
+
+        The job is resolved from ``runs.job_id`` (ADR-0102), so a caller never
+        walks the job store to answer "which job started this".
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT job_processes.*, runs.job_id AS job_id
+                FROM job_processes
+                LEFT JOIN runs ON runs.id = job_processes.run_id
+                WHERE job_processes.run_id = ?
+                ORDER BY job_processes.first_seen_at, job_processes.pid
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_job_ports(self, run_id: str) -> list[dict[str, Any]]:
+        """Return every observed listening socket for one run, oldest first."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT job_ports.*, runs.job_id AS job_id
+                FROM job_ports
+                LEFT JOIN runs ON runs.id = job_ports.run_id
+                WHERE job_ports.run_id = ?
+                ORDER BY job_ports.first_seen_at, job_ports.port
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_job_leftovers(
+        self, run_id: str, attempt_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Return the leftovers verdict for one attempt, or the latest one."""
+        with self._get_connection() as conn:
+            if attempt_id is not None:
+                row = conn.execute(
+                    """
+                    SELECT job_leftovers.*, runs.job_id AS job_id
+                    FROM job_leftovers
+                    LEFT JOIN runs ON runs.id = job_leftovers.run_id
+                    WHERE job_leftovers.run_id = ? AND job_leftovers.attempt_id = ?
+                    """,
+                    (run_id, attempt_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT job_leftovers.*, runs.job_id AS job_id
+                    FROM job_leftovers
+                    LEFT JOIN runs ON runs.id = job_leftovers.run_id
+                    WHERE job_leftovers.run_id = ?
+                    ORDER BY job_leftovers.recorded_at DESC
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["detail"] = json.loads(result.pop("detail_json") or "{}")
+        except (TypeError, ValueError):
+            result["detail"] = {}
+        return result
+
     def record_worker_activity(
         self,
         run_id: str,
+
         attempt_id: str | None = None,
         provider: str | None = None,
         model: str | None = None,

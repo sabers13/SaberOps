@@ -1321,6 +1321,7 @@ def run_process(
     worker_monitor: Any | None = None,
     on_monitor_transition: Callable[[dict[str, Any]], None] | None = None,
     control_interrupt: Callable[[], bool] | None = None,
+    on_process_sample: Callable[[], None] | None = None,
 ) -> ProcessResult:
     """Execute a subprocess deterministically without shell=True.
 
@@ -1368,6 +1369,12 @@ def run_process(
             (never per sample).  Payload keys: ``state``, ``reason``,
             ``pgid``, ``member_count``, ``evidence_incomplete``,
             ``timestamp``.  Callback errors never abort execution.
+        on_process_sample: Optional callback invoked once per streaming
+            wait-loop iteration (about every 0.2 s) so the caller can sample
+            the live process tree, for example the per-job process and port
+            inventory.  Throttling is the callback's own responsibility; a
+            callback error never aborts execution.  The blocking
+            (non-streaming) path never calls it.
 
     Returns:
         ProcessResult with exit code, stdout, stderr, duration, and timeout
@@ -1666,6 +1673,12 @@ def run_process(
             stall_reported = False
             monitor_stall_terminated = False
             while True:
+                if on_process_sample is not None:
+                    try:
+                        on_process_sample()
+                    except Exception:
+                        # Observation is advisory; it must never abort the worker.
+                        pass
                 interrupt = False
                 if control_interrupt is not None:
                     try:
