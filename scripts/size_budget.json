@@ -1,5 +1,5 @@
 {
-  "logic_lines": 180519,
+  "logic_lines": 180559,
   "suppression_comments": 374,
-  "reason": "H49: the advisor's own per-call bound (ADR-0107) plus its slow, hung and document tests"
+  "reason": "H48: a launch failure never teaches a memory peak, plus its regression test"
 }
