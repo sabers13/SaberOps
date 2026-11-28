@@ -25,21 +25,20 @@ projection, surfaced read-only via `orch project list|register|active` and
 refilled scheduler.
 
 **TARGET — not yet implemented.** A deterministic, continuously refilled
-**cross-phase ready frontier across 3 active projects x 5 executing child tasks**
-(two independent, owner-adjustable **upper-bound limits**, not a quota or
-occupancy target), admitted only under an **owner-approved plan version** with
-stable project/task identity, **exactly one active implementation Worker lease
-per task**, hard START versus deferred INTEGRATE edges, exclusive write scopes,
-a shared per-filesystem storage reservation budget, lease fencing, exact-SHA evidence,
-one exclusive integration gate, and a UI that shows real ready/blocked/held
-reasons. A blocked early-phase dependency must not stop unrelated later-phase
-implementation **where beneficial** — but eligibility never obligates dispatch:
-sequential, one-task, and zero-wave outcomes are legitimate, and the runtime
-must never auto-create, split, or launch work to fill free slots. A ready task
-need not dispatch when cost, risk, or the owner plan says no. Semantic review
-covers **implementation Worker** candidates only; pure integration merges and
-bridge-test-only commits get **no automatic semantic review**, while substantive
-production glue returns to an accountable Worker for G1 and task-scoped review.
+**cross-phase ready frontier**, admitted only under an **owner-approved plan
+version** with stable project/task identity, **exactly one active implementation
+Worker lease per task**, hard START versus deferred INTEGRATE edges, exclusive
+write scopes, a shared per-filesystem storage reservation budget, lease fencing,
+exact-SHA evidence, one exclusive integration gate, and a UI that shows real
+ready/blocked/held reasons. A blocked early-phase dependency must not stop
+unrelated later-phase implementation **where beneficial** — but eligibility
+never obligates dispatch: sequential, one-task, and zero-wave outcomes are
+legitimate, and the runtime must never auto-create, split, or launch work to
+fill free slots. A ready task need not dispatch when cost, risk, or the owner
+plan says no. Semantic review covers **implementation Worker** candidates only;
+pure integration merges and bridge-test-only commits get **no automatic semantic
+review**, while substantive production glue returns to an accountable Worker for
+G1 and task-scoped review.
 That stage guard (trusted role/stage/task provenance, never prompt or
 branch-name inference, no phantom pending-REVIEW for integration-only work) is
 **TARGET runtime behavior, not yet wired**: the UI and status evidence must not
@@ -58,6 +57,12 @@ duplicating running Workers. The manual pre-run check is operative now;
 runtime enforcement is TARGET, not yet proven on main. Pure *projections*
 (for example `saberops.ready_frontier`) compute nothing about live occupancy,
 hold no lease, dispatch nothing, and are never launch authority by themselves.
+Concurrency in that target follows the host-wide dynamic memory budget already
+implemented for gates and worker launches
+([ADR-0007](decisions/0007-dynamic-memory-budget.md)), not a fixed count. The
+3-active-projects x 5-executing-child-tasks figures are optional,
+owner-adjustable **upper-bound ceilings** — never a default, a quota, or an
+occupancy target.
 The target behaviour is delivered by the existing
 project/plan, settings, session, UI and security
 work, **not** by documentation. See

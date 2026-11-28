@@ -15,12 +15,20 @@ incrementally (the gate-slot and retention layers still read their own
 frozen constants until a follow-up step imports them from here — see
 "Adoption" below).
 
-| Setting | Default | Meaning |
+Concurrency is **not** a configured count. By default admission follows one
+host-wide memory budget — gate slots and worker launches are derived from live
+memory and reserve before they run ([ADR-0007](decisions/0007-dynamic-memory-budget.md)).
+The two `max_*` concurrency fields below are optional owner
+**upper ceilings**, never a default, a quota, or a target. No runtime consumer
+reads them yet, so admission never enforces a fixed number of tasks or sessions
+even when the owner sets one (see "Adoption").
+
+| Setting | Canonical value | Meaning |
 | --- | --- | --- |
-| `max_concurrent_tasks` | `3` | Concurrently active tasks (3x5 ceiling) |
-| `max_worker_sessions_per_project` | `5` | Worker sessions per project (3x5 ceiling) |
-| `gate_heavy_slots` | `1` | Owner-editable heavy gate-slot ceiling |
-| `gate_light_slots_max` | `8` | Owner-editable light gate-slot ceiling (`MAX_LIGHT_SLOTS`) |
+| `max_concurrent_tasks` | `3` | Optional upper ceiling on concurrently active tasks; not a default |
+| `max_worker_sessions_per_project` | `5` | Optional upper ceiling on worker sessions per project; not a default |
+| `gate_heavy_slots` | `1` | Declared heavy gate-slot ceiling; live capacity is dynamic |
+| `gate_light_slots_max` | `8` | Declared light gate-slot ceiling `MAX_LIGHT_SLOTS`; live capacity is dynamic |
 | `evidence_accepted_retention_days` | `90` | Accepted-run evidence retention |
 | `evidence_other_retention_days` | `30` | Other evidence retention |
 | `checkpoint_retention_days` | `7` | Checkpoint retention after terminal state |
@@ -31,9 +39,11 @@ frozen constants until a follow-up step imports them from here — see
 can never be persisted. The rules are fail-closed:
 
 - `1 <= max_concurrent_tasks <= 3` and `1 <= max_worker_sessions_per_project <= 5`
-  (the 3x5 ceilings are maximums, never utilization targets);
+  (these bound the declared ceilings only; they are never utilization targets
+  and never the concurrency the runtime applies);
 - `gate_heavy_slots >= 1` and `gate_light_slots_max >= max_concurrent_tasks`
-  (the gate-slot budget is validated against the configured worker concurrency);
+  (the declared gate-slot budget is validated against the declared worker
+  ceiling; live gate capacity is dynamic);
 - retention windows are positive and `evidence_other_retention_days` never
   exceeds `evidence_accepted_retention_days`;
 - `failed_scratch_cap_gib >= 0`.
