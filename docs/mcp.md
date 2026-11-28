@@ -484,7 +484,7 @@ when it is plain JSON, after a backup):
 ```bash
 orch connect                  # list agents on this computer and whether each is connected
 orch connect claude codex     # connect specific agents (or: orch connect all)
-orch connect claude --project # only for the current repository (.mcp.json)
+orch connect claude --project # only for the current repository (.mcp.json and its skills)
 orch connect --remove codex   # undo (also removes the instruction skills)
 orch connect codex --dry-run  # show what would change
 orch connect codex --skill    # also install the "turn on saberops" instruction file
@@ -507,7 +507,12 @@ description, and the full guide stays on the server as `saberops://guide`; the
 skills only point at it. The MCP server stays the only engine connection.
 Paths (each skill gets its own folder): `~/.claude/skills/saberops*/`,
 `~/.codex/skills/saberops*/`, `~/.config/opencode/skills/saberops*/` and
-`~/.gemini/config/skills/saberops*/`. Cursor has no local skill format, so it
+`~/.gemini/config/skills/saberops*/`. The files follow the MCP entry's scope:
+with `--project` Claude Code uses `<project>/.claude/skills/saberops*/` and
+OpenCode `<project>/.opencode/skills/saberops*/`, and `--remove`/`--dry-run`
+use the same scope. Codex and Antigravity have no project-scope skill or
+subagent format, so `--project --skill` is refused there instead of falling
+back to the user scope (ADR-0110). Cursor has no local skill format, so it
 reports **unsupported**. `--dry-run` prints every exact file and path; a file
 SaberOps did not write is never overwritten or removed.
 
@@ -652,7 +657,8 @@ stops the child with its own native control. Each attempt is labelled
 
 `orch connect --skill` also installs a `saberops-worker` definition per host
 subagent format (Claude Code, Codex, OpenCode) with worktree-confined
-permissions where the CLI has them. The planner guide tells the orchestrating
+permissions where the CLI has them, at the same scope as the MCP entry (user
+scope, or the project's `.claude/agents` / `.opencode/agents` with `--project`). The planner guide tells the orchestrating
 CLI to launch native workers only from that definition, to call
 `native_controls` while waiting, and to stop the child itself when SaberOps
 posts a stop. Design: ADR-0030.

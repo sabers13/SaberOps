@@ -1,5 +1,5 @@
 {
-  "logic_lines": 181142,
+  "logic_lines": 181467,
   "suppression_comments": 375,
-  "reason": "H50 owner rejection with a note after H48/H49/H51 landed (ADR-0108)"
+  "reason": "H52 scoped skill and worker install for project connects (ADR-0110)"
 }

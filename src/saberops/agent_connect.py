@@ -222,6 +222,13 @@ class Agent:
     #: agent has no local subagent format (``orch connect --agents`` reports it
     #: as unsupported).
     agent_dir: str = ""
+    #: Project-scope skill root, relative to the project directory.  Empty means
+    #: the agent has no project-level skill format, so ``--project --skill`` is
+    #: refused instead of falling back to the user scope (ADR-0110).
+    project_skill_dir: str = ""
+    #: Project-scope subagent root, relative to the project directory.  Empty
+    #: means the project scope has no subagent format and is refused the same way.
+    project_agent_dir: str = ""
 
 
 # Skill locations, each verified against the agent's own documentation or its
@@ -230,6 +237,9 @@ class Agent:
 #   Codex        $CODEX_HOME/skills/<name>/SKILL.md  (skill-installer target)
 #   OpenCode     ~/.config/opencode/skills/<name>/SKILL.md
 #   Antigravity  ~/.gemini/config/skills/<name>/SKILL.md
+# Project-scope locations follow the same per-CLI layout under the project
+# folder (Claude Code ``.claude/skills`` and OpenCode ``.opencode/skills``);
+# Codex and Antigravity have no project-scope format at all (ADR-0110).
 AGENTS: tuple[Agent, ...] = (
     Agent(
         "claude",
@@ -239,6 +249,8 @@ AGENTS: tuple[Agent, ...] = (
         project_scope=True,
         skill_dir=".claude/skills",
         agent_dir=".claude/agents",
+        project_skill_dir=".claude/skills",
+        project_agent_dir=".claude/agents",
     ),
     Agent("codex", "Codex", "codex", "cli", skill_dir=".codex/skills", agent_dir=".codex/agents"),
     Agent(
@@ -259,6 +271,8 @@ AGENTS: tuple[Agent, ...] = (
         project_file="opencode.json",
         skill_dir=".config/opencode/skills",
         agent_dir=".config/opencode/agents",
+        project_skill_dir=".opencode/skills",
+        project_agent_dir=".opencode/agents",
     ),
     Agent(
         "cursor",
@@ -493,25 +507,51 @@ def server_snippet(agent: Agent, *, profile: str | None = None) -> str:
     return json.dumps({"mcpServers": {SERVER_NAME: server}}, indent=2)
 
 
+def _skill_root(agent: Agent, *, home: Path | None, project: Path | None) -> Path | None:
+    """The skill root for one scope, or ``None`` when that scope is unsupported.
+
+    ``project`` is the folder the MCP entry was registered for.  It switches the
+    files to the project's own root, never a home fallback (ADR-0110).
+    """
+    if project is not None:
+        return project / agent.project_skill_dir if agent.project_skill_dir else None
+    return _home(home) / agent.skill_dir if agent.skill_dir else None
+
+
+def _agent_root(agent: Agent, *, home: Path | None, project: Path | None) -> Path | None:
+    """The subagent root for one scope, or ``None`` when that scope is unsupported."""
+    if project is not None:
+        return project / agent.project_agent_dir if agent.project_agent_dir else None
+    return _home(home) / agent.agent_dir if agent.agent_dir else None
+
+
 def skill_path(
-    agent: Agent, *, home: Path | None = None, name: str = SKILL_NAME
+    agent: Agent,
+    *,
+    home: Path | None = None,
+    name: str = SKILL_NAME,
+    project: Path | None = None,
 ) -> Path | None:
     """Absolute ``SKILL.md`` path for one skill, or ``None`` when unsupported."""
-    if not agent.skill_dir:
+    root = _skill_root(agent, home=home, project=project)
+    if root is None:
         return None
     if name not in SKILL_NAMES:
         raise ValueError(f"unknown SaberOps skill {name!r}")
-    return _home(home) / agent.skill_dir / name / "SKILL.md"
+    return root / name / "SKILL.md"
 
 
-
-
-def agent_file_path(agent: Agent, target: str, *, home: Path | None = None) -> Path | None:
+def agent_file_path(
+    agent: Agent, target: str, *, home: Path | None = None, project: Path | None = None
+) -> Path | None:
     """Absolute definition path for one proxy, or ``None`` when unsupported."""
-    if not agent.agent_dir or agent.slug not in PROXIES:
+    if agent.slug not in PROXIES:
+        return None
+    root = _agent_root(agent, home=home, project=project)
+    if root is None:
         return None
     extension = "toml" if agent.slug == "codex" else "md"
-    return _home(home) / agent.agent_dir / f"{target}.{extension}"
+    return root / f"{target}.{extension}"
 
 
 def _proxy_body(agent: Agent, proxy: Proxy) -> str:
@@ -687,12 +727,17 @@ WORKER_DESCRIPTION = (
 )
 
 
-def worker_file_path(agent: Agent, *, home: Path | None = None) -> Path | None:
+def worker_file_path(
+    agent: Agent, *, home: Path | None = None, project: Path | None = None
+) -> Path | None:
     """Absolute definition path for the native worker, or ``None`` if unsupported."""
-    if not agent.agent_dir or agent.slug not in WORKER_VENDOR:
+    if agent.slug not in WORKER_VENDOR:
+        return None
+    root = _agent_root(agent, home=home, project=project)
+    if root is None:
         return None
     extension = "toml" if agent.slug == "codex" else "md"
-    return _home(home) / agent.agent_dir / f"{WORKER_NAME}.{extension}"
+    return root / f"{WORKER_NAME}.{extension}"
 
 
 def _worker_body(agent: Agent) -> str:
@@ -862,13 +907,32 @@ def _write_worker_file(
     )
 
 
-def install_worker(slug: str, *, home: Path | None = None, dry_run: bool = False) -> ConnectResult:
+def _project_scope_refusal(agent: Agent, kind: str) -> ConnectResult:
+    """Refuse a project install on a CLI whose project scope has no such file.
+
+    The alternative is a silent fallback to the user scope, which leaves an
+    agent file naming an MCP server that is not configured there (ADR-0110).
+    """
+    return ConnectResult(
+        agent.slug,
+        False,
+        f"{agent.name} has no project-level {kind}; nothing was written. "
+        f"Run `orch connect {agent.slug}` without --project to use the user scope.",
+        agent_action="refused",
+    )
+
+
+def install_worker(
+    slug: str, *, home: Path | None = None, dry_run: bool = False, project: Path | None = None
+) -> ConnectResult:
     """Install the native worker definition this host CLI supports."""
     agent = agent_by_slug(slug)
     if agent is None:
         return ConnectResult(slug, False, f"Unknown agent {slug!r}.")
-    path = worker_file_path(agent, home=home)
+    path = worker_file_path(agent, home=home, project=project)
     if path is None:
+        if agent.slug in WORKER_VENDOR and project is not None:
+            return _project_scope_refusal(agent, "subagent format")
         return ConnectResult(
             slug,
             True,
@@ -887,13 +951,17 @@ def install_worker(slug: str, *, home: Path | None = None, dry_run: bool = False
     )
 
 
-def remove_worker(slug: str, *, home: Path | None = None) -> ConnectResult:
+def remove_worker(
+    slug: str, *, home: Path | None = None, project: Path | None = None
+) -> ConnectResult:
     """Remove only a marked native worker definition."""
     agent = agent_by_slug(slug)
     if agent is None:
         return ConnectResult(slug, False, f"Unknown agent {slug!r}.")
-    path = worker_file_path(agent, home=home)
+    path = worker_file_path(agent, home=home, project=project)
     if path is None:
+        if agent.slug in WORKER_VENDOR and project is not None:
+            return _project_scope_refusal(agent, "subagent format")
         return ConnectResult(
             slug, True, f"{agent.name} has no native worker definition.", agent_action="unsupported"
         )
@@ -985,12 +1053,15 @@ def _write_agent_file(
     )
 
 
-def install_agents(slug: str, *, home: Path | None = None, dry_run: bool = False) -> ConnectResult:
+def install_agents(
+    slug: str, *, home: Path | None = None, dry_run: bool = False, project: Path | None = None
+) -> ConnectResult:
     """Install every proxy definition this host CLI supports.
 
     Each definition carries :data:`AGENT_MARKER`, is written atomically, and a
     file SaberOps did not write is never overwritten.  A dry run returns the
-    exact path and content and writes nothing.
+    exact path and content and writes nothing.  ``project`` installs under the
+    project folder and never falls back to the user scope (ADR-0110).
     """
     agent = agent_by_slug(slug)
     if agent is None:
@@ -1003,10 +1074,12 @@ def install_agents(slug: str, *, home: Path | None = None, dry_run: bool = False
             f"{agent.name} has no known subagent format; proxy definitions are unsupported there.",
             agent_action="unsupported",
         )
+    if project is not None and not agent.project_agent_dir:
+        return _project_scope_refusal(agent, "subagent format")
     files: list[AgentFile] = []
     missing_dir = False
     for proxy in proxies:
-        path = agent_file_path(agent, proxy.name, home=home)
+        path = agent_file_path(agent, proxy.name, home=home, project=project)
         assert path is not None
         missing_dir = missing_dir or not path.parent.exists()
         content = agent_document(agent.slug, proxy.name)
@@ -1023,8 +1096,8 @@ def install_agents(slug: str, *, home: Path | None = None, dry_run: bool = False
     message = " ".join(item.message for item in files)
     if agent.slug == "claude" and missing_dir and action in {"installed", "would-install"}:
         message += (
-            " Restart Claude Code once: it only watches ~/.claude/agents after that"
-            " folder exists."
+            f" Restart Claude Code once: it only watches {Path(files[0].path).parent}"
+            " after that folder exists."
         )
     if agent.slug == "codex" and action in {"installed", "would-install"}:
         message += (
@@ -1040,7 +1113,9 @@ def install_agents(slug: str, *, home: Path | None = None, dry_run: bool = False
     )
 
 
-def remove_agents(slug: str, *, home: Path | None = None) -> ConnectResult:
+def remove_agents(
+    slug: str, *, home: Path | None = None, project: Path | None = None
+) -> ConnectResult:
     """Remove only marked proxy definitions, keeping foreign siblings."""
     agent = agent_by_slug(slug)
     if agent is None:
@@ -1053,9 +1128,11 @@ def remove_agents(slug: str, *, home: Path | None = None) -> ConnectResult:
             f"{agent.name} has no known subagent format; there is nothing to remove.",
             agent_action="unsupported",
         )
+    if project is not None and not agent.project_agent_dir:
+        return _project_scope_refusal(agent, "subagent format")
     files: list[AgentFile] = []
     for proxy in proxies:
-        path = agent_file_path(agent, proxy.name, home=home)
+        path = agent_file_path(agent, proxy.name, home=home, project=project)
         assert path is not None
         if not path.exists():
             files.append(
@@ -1107,7 +1184,7 @@ def remove_agents(slug: str, *, home: Path | None = None) -> ConnectResult:
     else:
         action = "removed"
     if action == "removed":
-        directory = agent_file_path(agent, proxies[0].name, home=home)
+        directory = agent_file_path(agent, proxies[0].name, home=home, project=project)
         assert directory is not None
         try:
             directory.parent.rmdir()
@@ -1141,7 +1218,12 @@ def _skill_rollup(files: Sequence[SkillFile], *, dry_run: bool = False) -> str:
 
 
 def _install_one_skill(
-    agent: Agent, name: str, *, home: Path | None = None, dry_run: bool = False
+    agent: Agent,
+    name: str,
+    *,
+    home: Path | None = None,
+    dry_run: bool = False,
+    project: Path | None = None,
 ) -> SkillFile:
     """Install one instruction skill for one agent.
 
@@ -1149,7 +1231,7 @@ def _install_one_skill(
     so a skill the owner wrote by hand is never touched.  A dry run returns the
     exact path and content and writes nothing.
     """
-    path = skill_path(agent, home=home, name=name)
+    path = skill_path(agent, home=home, name=name, project=project)
     assert path is not None
     label = "SaberOps" if name == SKILL_NAME else name
     content = skill_document(name)
@@ -1207,9 +1289,11 @@ def _install_one_skill(
     )
 
 
-def _remove_one_skill(agent: Agent, name: str, *, home: Path | None = None) -> SkillFile:
+def _remove_one_skill(
+    agent: Agent, name: str, *, home: Path | None = None, project: Path | None = None
+) -> SkillFile:
     """Remove only the skill file SaberOps wrote, and its now-empty folder."""
-    path = skill_path(agent, home=home, name=name)
+    path = skill_path(agent, home=home, name=name, project=project)
     assert path is not None
     label = "SaberOps" if name == SKILL_NAME else name
     if not path.exists():
@@ -1265,12 +1349,14 @@ def _skill_result(
 
 
 def install_skill(
-    slug: str, *, home: Path | None = None, dry_run: bool = False
+    slug: str, *, home: Path | None = None, dry_run: bool = False, project: Path | None = None
 ) -> ConnectResult:
     """Install the four SaberOps skills plus the native worker definition.
 
     Every file carries an ownership marker, so a file SaberOps did not write
-    is never overwritten or later removed.
+    is never overwritten or later removed.  ``project`` writes the skill and
+    worker beside the project-scoped MCP entry instead of under the home
+    directory (ADR-0110).
     """
     agent = agent_by_slug(slug)
     if agent is None:
@@ -1283,8 +1369,15 @@ def install_skill(
             skill_action="unsupported",
             skill_files=(SkillFile(SKILL_NAME, action="unsupported"),),
         )
+    if project is not None and not agent.project_skill_dir:
+        return replace(
+            _project_scope_refusal(agent, "skill format"),
+            skill_action="refused",
+            skill_files=(SkillFile(SKILL_NAME, action="refused"),),
+        )
     skill_files = tuple(
-        _install_one_skill(agent, name, home=home, dry_run=dry_run) for name in SKILL_NAMES
+        _install_one_skill(agent, name, home=home, dry_run=dry_run, project=project)
+        for name in SKILL_NAMES
     )
     skill = _skill_result(
         slug,
@@ -1292,7 +1385,7 @@ def install_skill(
         action=_skill_rollup(skill_files, dry_run=dry_run),
         dry_run=dry_run,
     )
-    worker = install_worker(slug, home=home, dry_run=dry_run)
+    worker = install_worker(slug, home=home, dry_run=dry_run, project=project)
     files = tuple(skill.agent_files) + tuple(worker.agent_files)
     return replace(
         skill,
@@ -1303,8 +1396,14 @@ def install_skill(
     )
 
 
-def remove_skill(slug: str, *, home: Path | None = None) -> ConnectResult:
-    """Remove every SaberOps skill and the native worker definition it owns."""
+def remove_skill(
+    slug: str, *, home: Path | None = None, project: Path | None = None
+) -> ConnectResult:
+    """Remove every SaberOps skill and the native worker definition it owns.
+
+    ``project`` removes only the files a project-scoped connect wrote and
+    leaves a user-scope install alone (ADR-0110).
+    """
     agent = agent_by_slug(slug)
     if agent is None:
         return ConnectResult(slug, False, f"Unknown agent {slug!r}.")
@@ -1316,14 +1415,22 @@ def remove_skill(slug: str, *, home: Path | None = None) -> ConnectResult:
             skill_action="unsupported",
             skill_files=(SkillFile(SKILL_NAME, action="unsupported"),),
         )
-    skill_files = tuple(_remove_one_skill(agent, name, home=home) for name in SKILL_NAMES)
+    if project is not None and not agent.project_skill_dir:
+        return replace(
+            _project_scope_refusal(agent, "skill format"),
+            skill_action="refused",
+            skill_files=(SkillFile(SKILL_NAME, action="refused"),),
+        )
+    skill_files = tuple(
+        _remove_one_skill(agent, name, home=home, project=project) for name in SKILL_NAMES
+    )
     skill = _skill_result(
         slug,
         skill_files,
         action=_skill_rollup(skill_files),
         dry_run=False,
     )
-    worker = remove_worker(slug, home=home)
+    worker = remove_worker(slug, home=home, project=project)
     files = tuple(skill.agent_files) + tuple(worker.agent_files)
     return replace(
         skill,
@@ -1414,11 +1521,12 @@ def _with_skill(
     *,
     home: Path | None,
     dry_run: bool,
+    project: Path | None = None,
 ) -> ConnectResult:
     """Attach the instruction-file step to an MCP registration result."""
     if not result.ok:
         return result
-    skill = install_skill(agent.slug, home=home, dry_run=dry_run)
+    skill = install_skill(agent.slug, home=home, dry_run=dry_run, project=project)
     return replace(
         result,
         ok=result.ok and skill.ok,
@@ -1445,7 +1553,9 @@ def connect(
     """Register SaberOps with one agent (user scope, or ``project`` folder).
 
     With ``skill=True`` also install the small instruction file that teaches
-    the submit/wait/accept loop, where the agent supports a local skill.
+    the submit/wait/accept loop, where the agent supports a local skill.  The
+    skill and worker files follow the MCP entry's scope: ``project`` writes them
+    under the project, and no scope ever falls back to the other (ADR-0110).
 
     ``profile`` selects the owner profile the registered server runs as; the
     entry pins the resolved store bases so a CLI that filters the child
@@ -1461,6 +1571,14 @@ def connect(
     except ValueError as exc:
         return ConnectResult(slug, False, str(exc))
     if project is not None and not agent.project_scope:
+        if skill:
+            return ConnectResult(
+                slug,
+                False,
+                f"{agent.name} has no per-project MCP, skill or subagent setting; "
+                f"nothing was written. Remove --project to connect at user scope "
+                f"(`orch connect {agent.slug} --skill`).",
+            )
         return ConnectResult(slug, False, f"{agent.name} has no per-project MCP setting.")
     if agent.method == "json":
         path = _json_path(agent, project=project, home=home)
@@ -1471,7 +1589,11 @@ def connect(
                 _with_path_warning(f"Would add SaberOps to {path}."),
                 snippet=server_snippet(agent, profile=profile),
             )
-            return _with_skill(preview, agent, home=home, dry_run=True) if skill else preview
+            return (
+                _with_skill(preview, agent, home=home, dry_run=True, project=project)
+                if skill
+                else preview
+            )
         edited = _json_edit(path, agent, remove=False, profile=profile)
         json_result = ConnectResult(
             edited.agent,
@@ -1480,7 +1602,11 @@ def connect(
             edited.commands,
             edited.snippet,
         )
-        return _with_skill(json_result, agent, home=home, dry_run=False) if skill else json_result
+        return (
+            _with_skill(json_result, agent, home=home, dry_run=False, project=project)
+            if skill
+            else json_result
+        )
     if shutil.which(agent.executable) is None and runner is None:
         return ConnectResult(
             slug,
@@ -1505,7 +1631,11 @@ def connect(
         preview = ConnectResult(
             slug, True, _with_path_warning(would), commands=tuple(commands)
         )
-        return _with_skill(preview, agent, home=home, dry_run=True) if skill else preview
+        return (
+            _with_skill(preview, agent, home=home, dry_run=True, project=project)
+            if skill
+            else preview
+        )
     result = run(argv, project)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
@@ -1531,7 +1661,11 @@ def connect(
     connected = ConnectResult(
         slug, True, _with_path_warning(message), commands=tuple(commands)
     )
-    return _with_skill(connected, agent, home=home, dry_run=False) if skill else connected
+    return (
+        _with_skill(connected, agent, home=home, dry_run=False, project=project)
+        if skill
+        else connected
+    )
 
 
 def disconnect(
@@ -1542,10 +1676,17 @@ def disconnect(
     home: Path | None = None,
     skill: bool = True,
 ) -> ConnectResult:
-    """Disconnect one agent; also remove the SaberOps skill it owns."""
+    """Disconnect one agent; also remove the SaberOps skill it owns.
+
+    With ``project`` only that project's MCP entry, skills and worker are
+    removed; a user-scope install is untouched.  A CLI with no project scope is
+    refused rather than having its user entry removed (ADR-0110).
+    """
     agent = agent_by_slug(slug)
     if agent is None:
         return ConnectResult(slug, False, f"Unknown agent {slug!r}.")
+    if project is not None and not agent.project_scope:
+        return _project_scope_refusal(agent, "MCP, skill or subagent setting")
     if agent.method == "json":
         res = _json_edit(_json_path(agent, project=project, home=home), agent, remove=True)
     elif shutil.which(agent.executable) is None and runner is None:
@@ -1564,7 +1705,7 @@ def disconnect(
             )
     if not skill:
         return res
-    skill_result = remove_skill(slug, home=home)
+    skill_result = remove_skill(slug, home=home, project=project)
     return replace(
         res,
         ok=res.ok and skill_result.ok,
@@ -1576,10 +1717,30 @@ def disconnect(
     )
 
 
-def is_connected(agent: Agent, *, home: Path | None = None, runner: Runner | None = None) -> bool:
-    """Cheap user-scope check: read the agent's own registry, never start it."""
+def is_connected(
+    agent: Agent,
+    *,
+    home: Path | None = None,
+    runner: Runner | None = None,
+    project: Path | None = None,
+) -> bool:
+    """Cheap check for one scope: read the agent's own registry, never start it.
+
+    With ``project`` this reads only the project's own registration file, so a
+    user-scope connection never counts as connected for the project (ADR-0110).
+    """
     base = _home(home)
     try:
+        if project is not None:
+            if not agent.project_scope:
+                return False
+            if agent.slug == "claude":
+                data = json.loads((project / ".mcp.json").read_text(encoding="utf-8"))
+                return SERVER_NAME in (data.get("mcpServers") or {})
+            path = _json_path(agent, project=project, home=home)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            key = "mcp" if agent.slug == "opencode" else "mcpServers"
+            return SERVER_NAME in (data.get(key) or {})
         if agent.slug == "claude":
             data = json.loads((base / ".claude.json").read_text(encoding="utf-8"))
             return SERVER_NAME in (data.get("mcpServers") or {})

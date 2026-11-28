@@ -3051,7 +3051,10 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         const=".",
         default=None,
-        help="Connect only for this project folder (default: current folder).",
+        help=(
+            "Connect only for this project folder (default: current folder). "
+            "Skills and agent files go under that folder too."
+        ),
     )
     connect_parser.add_argument(
         "--dry-run", action="store_true", help="Show what would change; change nothing."
@@ -8263,7 +8266,7 @@ def handle_connect(args: argparse.Namespace) -> int:
     wanted = [a.strip().lower() for a in (getattr(args, "agents", None) or []) if a.strip()]
     project = Path(args.project).expanduser().resolve() if args.project else None
     if getattr(args, "agents_mode", False):
-        return _handle_agent_definitions(args, wanted)
+        return _handle_agent_definitions(args, wanted, project)
     try:
         profile = validate_profile(getattr(args, "profile", None) or "")
     except ValueError as exc:
@@ -8328,8 +8331,14 @@ def handle_connect(args: argparse.Namespace) -> int:
     return 0 if all(r.ok for r in results) else 1
 
 
-def _handle_agent_definitions(args: argparse.Namespace, wanted: list[str]) -> int:
-    """`orch connect --agents`: write or remove proxy subagent definitions only."""
+def _handle_agent_definitions(
+    args: argparse.Namespace, wanted: list[str], project: Path | None = None
+) -> int:
+    """`orch connect --agents`: write or remove proxy subagent definitions only.
+
+    ``--project`` keeps the definitions beside that project's MCP entry; a CLI
+    without project scope is refused instead of writing at the user scope.
+    """
     from dataclasses import asdict
 
     from saberops.agent_connect import AGENTS, install_agents, is_connected, remove_agents
@@ -8342,9 +8351,9 @@ def _handle_agent_definitions(args: argparse.Namespace, wanted: list[str]) -> in
         print(f"[!] Unknown agent(s): {', '.join(unknown)}", file=sys.stderr)
         return 2
     if args.remove:
-        results = [remove_agents(slug) for slug in hosts]
+        results = [remove_agents(slug, project=project) for slug in hosts]
     else:
-        results = [install_agents(slug, dry_run=args.dry_run) for slug in hosts]
+        results = [install_agents(slug, dry_run=args.dry_run, project=project) for slug in hosts]
     if args.json:
         print(json.dumps({"results": [asdict(r) for r in results]}, indent=2, sort_keys=True))
     else:
@@ -8363,14 +8372,15 @@ def _handle_agent_definitions(args: argparse.Namespace, wanted: list[str]) -> in
             for slug in hosts
             if slug in agents_by_slug
             and agents_by_slug[slug].agent_dir
-            and not is_connected(agents_by_slug[slug])
+            and not is_connected(agents_by_slug[slug], project=project)
         ]
         if missing:
             names = " ".join(agent.slug for agent in missing)
+            scope = f" --project {project}" if project is not None else ""
             print(
                 "\nConnect the SaberOps MCP server first for: "
                 + ", ".join(agent.name for agent in missing)
-                + f".\nRun: orch connect {names}"
+                + f".\nRun: orch connect {names}{scope}"
             )
     return 0 if all(r.ok for r in results) else 1
 
