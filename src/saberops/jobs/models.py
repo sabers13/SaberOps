@@ -216,6 +216,10 @@ PREEMPTION_LIMIT = "PREEMPTION_LIMIT"
 #: and records this as the terminal failure reason if it loses a second
 #: dispatch the same way.
 DISPATCH_WINDOW_LOST = "DISPATCH_WINDOW_LOST"
+#: A dispatched run never produced a live execution owner: the launch failed
+#: after the run row was written, or its owner was gone by the next tick.  The
+#: run carries the exact launch reason and the owner action.
+LAUNCH_FAILED = "LAUNCH_FAILED"
 
 FAILURE_REASONS: frozenset[str] = frozenset(
     {
@@ -225,6 +229,7 @@ FAILURE_REASONS: frozenset[str] = frozenset(
         PREEMPTION_LIMIT,
         CORRUPT_JOB_ROW,
         DISPATCH_WINDOW_LOST,
+        LAUNCH_FAILED,
     }
 )
 
@@ -676,6 +681,7 @@ __all__ = [
     "coerce_job_role",
     "DISPATCHABLE_ROLES",
     "FAILURE_REASONS",
+    "LAUNCH_FAILED",
     "NO_ROUTE_FOR_REQUIREMENTS",
     "PREEMPTION_LIMIT",
     "PRIORITY_ORDER",

@@ -2544,6 +2544,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scheduler_start.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     scheduler_start.add_argument("--json", action="store_true", help="JSON output")
+    scheduler_status = scheduler_sub.add_parser(
+        "status",
+        help="Report whether the scheduler runs, its last tick and its last error.",
+    )
+    scheduler_status.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    scheduler_status.add_argument("--json", action="store_true", help="JSON output")
 
     # orch capacity show [--json]
     capacity_parser = subparsers.add_parser(
@@ -7560,6 +7566,14 @@ def handle_job_get(args: argparse.Namespace) -> int:
     print(f"Job        : {job.job_id}")
     print(f"Kind       : {job.kind.value}")
     print(f"State      : {job.state.value}")
+    current_run = db.get_run(job.current_run_id) if job.current_run_id else None
+    reason = (current_run.result_summary if current_run is not None else None) or (
+        job.failure_reason
+    )
+    if reason:
+        # The failed-run summary (for example a failed launch and the owner
+        # action) is the owner-facing reason, not just internal evidence.
+        print(f"Reason     : {reason}")
     if job.kind.value == "SCOUT":
         from saberops.scout import latest_report as _report
 
@@ -7877,6 +7891,43 @@ def handle_scheduler_start(args: argparse.Namespace) -> int:
         print("[!] The scheduler did not acquire its lease", file=sys.stderr)
         return 1
     print(f"Database: {db.db_path}")
+    return 0
+
+
+def handle_scheduler_status(args: argparse.Namespace) -> int:
+    """Handle `orch scheduler status`: liveness, last tick and last error."""
+    from types import SimpleNamespace
+
+    from saberops.capacity.loop import read_scheduler_status
+    from saberops.db import Database as _Database
+
+    db_path = getattr(args, "db", None)
+    db = _Database(db_path) if db_path else _Database()
+    status = read_scheduler_status(SimpleNamespace(db_path=db.db_path))
+    if getattr(args, "json", False):
+        print(json.dumps({**status, "db": str(db.db_path)}, indent=2, sort_keys=True))
+        return 0
+    state = "running" if status["running"] else "not running"
+    print(f"Scheduler  : {state}")
+    last_tick = status.get("last_tick_at")
+    outcome = status.get("last_outcome")
+    if last_tick:
+        suffix = f" ({outcome})" if outcome else ""
+        print(f"Last tick  : {last_tick}{suffix}")
+    else:
+        print("Last tick  : never recorded")
+    if status.get("last_error"):
+        at = status.get("last_error_at")
+        suffix = f" at {at}" if at else ""
+        print(f"Last error : {status['last_error']}{suffix}")
+        jobs = status.get("last_error_jobs") or []
+        if jobs:
+            print(f"Blocked    : {', '.join(str(job) for job in jobs)}")
+    elif not status["running"]:
+        print("Last error : none recorded")
+    if status.get("stopped_at"):
+        print(f"Stopped    : {status['stopped_at']}")
+    print(f"Database   : {db.db_path}")
     return 0
 
 
@@ -9057,6 +9108,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_scheduler_run(args)
         elif args.scheduler_command == "start":
             return handle_scheduler_start(args)
+        elif args.scheduler_command == "status":
+            return handle_scheduler_status(args)
     elif args.command == "capacity":
         if args.capacity_command == "show":
             return handle_capacity_show(args)

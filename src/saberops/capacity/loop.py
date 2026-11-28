@@ -59,6 +59,7 @@ from saberops.control_plane.policy import (
 from saberops.jobs import store
 from saberops.jobs.models import (
     DISPATCH_WINDOW_LOST,
+    LAUNCH_FAILED,
     Job,
     JobState,
     WaitingReason,
@@ -89,8 +90,15 @@ DEFAULT_TICK_INTERVAL = 2.0
 #: Tick holds that clear from durable state or a live run alone.  The
 #: continuous loop logs and keeps polling on these instead of exiting: a
 #: dispatch-window residue becomes repairable as soon as its lease expiry and
-#: grace bound pass, and a live split-store run can finish on a later tick.
-_RESUMABLE_HOLD_REASONS = frozenset({"running_run_status_unresolved"})
+#: grace bound pass, a live split-store run can finish on a later tick, and the
+#: legacy-RUNNING hold clears when the run reaches a terminal status.
+_RESUMABLE_HOLD_REASONS = frozenset(
+    {"legacy_running_without_reservation", "running_run_status_unresolved"}
+)
+
+#: Run event carrying the exception that ended a failed launch.  The scheduler
+#: reads it back on a later tick so the failed job names the real cause.
+LAUNCH_FAILED_EVENT = "run_launch_failed"
 
 
 def _utcnow(now: datetime | None) -> datetime:
@@ -145,6 +153,99 @@ def scheduler_alive(db: Any) -> bool:
                 and not _holder_dead(str(row[1])))
     except sqlite3.Error:
         return False
+
+
+def scheduler_status_path(db: Any) -> Path:
+    """The durable status file for this owner store's scheduler."""
+    path = _scheduler_path(db)
+    return path.with_name(path.name + ".scheduler-status.json")
+
+
+def _read_status_file(db: Any) -> dict[str, Any]:
+    path = scheduler_status_path(db)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _write_scheduler_status(
+    db: Any,
+    *,
+    result: TickResult | None,
+    now: datetime | None = None,
+    holder_id: str | None = None,
+    stopped: bool,
+) -> None:
+    """Record the scheduler's last tick and error; never raise into the loop."""
+    moment = _utcnow(now)
+    data = _read_status_file(db)
+    if result is not None:
+        data["last_tick_at"] = moment.isoformat()
+        data["last_ran"] = result.ran
+        data["last_outcome"] = "ok" if result.ran else (result.reason or "unknown")
+        if result.ran:
+            data["last_error"] = None
+            data["last_error_at"] = None
+        else:
+            error = result.storage_infra_reason or result.reason or "unknown"
+            data["last_error"] = error
+            data["last_error_at"] = moment.isoformat()
+            if result.legacy_running_jobs:
+                data["last_error_jobs"] = list(result.legacy_running_jobs)
+            elif result.unresolved_running_jobs:
+                data["last_error_jobs"] = list(result.unresolved_running_jobs)
+            else:
+                data["last_error_jobs"] = []
+    data["holder_id"] = holder_id
+    data["pid"] = os.getpid()
+    data["updated_at"] = moment.isoformat()
+    if stopped:
+        data["stopped_at"] = moment.isoformat()
+        data["stop_reason"] = data.get("last_error")
+    else:
+        data["stopped_at"] = None
+        data["stop_reason"] = None
+    path = scheduler_status_path(db)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logging.getLogger(__name__).exception("could not write scheduler status %s", path)
+        tmp.unlink(missing_ok=True)
+
+
+def read_scheduler_status(db: Any) -> dict[str, Any]:
+    """Report liveness and the durable last tick/error of this store's scheduler."""
+    data = {
+        "running": scheduler_alive(db),
+        "db": str(_scheduler_path(db)),
+        "status_file": str(scheduler_status_path(db)),
+        "last_tick_at": None,
+        "last_outcome": None,
+        "last_error": None,
+        "last_error_at": None,
+        "stopped_at": None,
+        "stop_reason": None,
+    }
+    stored = _read_status_file(db)
+    for key in (
+        "holder_id",
+        "pid",
+        "last_tick_at",
+        "last_ran",
+        "last_outcome",
+        "last_error",
+        "last_error_at",
+        "last_error_jobs",
+        "stopped_at",
+        "stop_reason",
+    ):
+        if key in stored:
+            data[key] = stored[key]
+    return data
 
 
 def ensure_scheduler_running(db: Any, *, respect_disable: bool = True) -> bool:
@@ -497,6 +598,119 @@ def _lookup_run_status(db: Any, run_id: str) -> RunStatus | None:
         return run.status if run is not None else None
     except Exception:
         return None
+
+
+def _recorded_launch_failure(db: Any, run_id: str) -> str | None:
+    """The exception text of the run's newest failed launch, when recorded."""
+    try:
+        events = db.get_events_by_type(run_id, LAUNCH_FAILED_EVENT)
+    except Exception:
+        return None
+    for event in reversed(events):
+        payload = event.payload or {}
+        reason = payload.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+    return None
+
+
+def _record_launch_failure(db: Any, run_id: str, exc: BaseException) -> None:
+    """Persist one failed launch's cause on its run; never raise into dispatch."""
+    reason = f"{type(exc).__name__}: {exc}".strip()
+    # A launch error can carry a large provider payload; keep the durable
+    # owner-visible reason bounded.
+    reason = reason[:500]
+    try:
+        db.record_event(run_id, LAUNCH_FAILED_EVENT, payload={"reason": reason})
+    except Exception:
+        logging.getLogger(__name__).exception("could not record failed launch for %s", run_id)
+
+
+def settle_failed_launch(
+    db: Any, job: Job, *, now: datetime | None = None
+) -> ReconcileChange | None:
+    """Fail one PENDING run whose launch failed or whose owner is gone.
+
+    A dispatch whose launch raised after writing the run row leaves the job
+    RUNNING on a PENDING run.  The next tick reads the recorded launch failure
+    (or proves the owner is gone) and terminalizes the run, fails the job with
+    :data:`LAUNCH_FAILED`, and releases the reservation -- instead of holding
+    the whole store on ``legacy_running_without_reservation``.
+
+    Only a PENDING run is considered: a launch path claims ownership before it
+    creates a process, so a PENDING run with no live owner cannot have a
+    worker.  LIVE and UNKNOWN liveness are never acted on, and a
+    cancellation-in-progress keeps its own terminal transition.
+    """
+    run_id = job.current_run_id
+    if not run_id:
+        return None
+    try:
+        run = db.get_run(run_id)
+    except Exception:
+        return None
+    if run is None or run.status is not RunStatus.PENDING:
+        return None
+    from saberops.native_workers import native_run_marker
+
+    if native_run_marker(db, run_id) is not None:
+        # A native attempt is cooperative work, not a supervised launch.
+        return None
+    from saberops.ownership import ExecutionOwner, Liveness
+    from saberops.supervisor import RunSupervisor
+
+    try:
+        owner, liveness = RunSupervisor(db=db).owner_evidence(run_id)
+    except Exception:
+        return None
+    if liveness is not Liveness.DEAD:
+        return None
+    if owner is not None and owner.is_cancelling:
+        return None
+    detail = _recorded_launch_failure(db, run_id) or (
+        "the launch never produced a live execution owner"
+    )
+    summary = (
+        f"launch failed: {detail}. "
+        "Owner action: fix the reported cause, then resubmit the job."
+    )
+    try:
+        outcome = db.terminalize_run_fenced(
+            run_id,
+            owner_id=owner.owner_id if owner is not None else None,
+            generation=owner.generation if owner is not None else None,
+            status=RunStatus.FAILED,
+            result_summary=summary,
+            attempt_reason=f"launch failed: {detail}",
+            expected_owner_states=(
+                (owner.state,) if owner is not None else (ExecutionOwner.CLAIMED,)
+            ),
+            release_reason="launch_failed",
+        )
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, ValueError, OSError):
+        return None
+    if outcome is None:
+        # Ownership moved on, or the run became terminal, while we decided.
+        return None
+    release(db, run_id, now=now)
+    try:
+        updated = store.reconcile_transition(
+            db,
+            job.job_id,
+            to=JobState.FAILED,
+            failure_reason=LAUNCH_FAILED,
+            now=now,
+        )
+    except (JobConflictError, JobTransitionError, JobNotFoundError):
+        # A concurrent cancel/transition owns the row; never fight it.
+        return None
+    return ReconcileChange(
+        job_id=job.job_id,
+        run_id=run_id,
+        to_state=JobState.FAILED,
+        failure_reason=LAUNCH_FAILED,
+        job=updated,
+    )
 
 
 #: How long after a dispatch (and after its lease expiry) a RUNNING job with no
@@ -1008,6 +1222,7 @@ def scheduler_tick(
 
     legacy_running_jobs: list[str] = []
     unresolved_running_jobs: list[str] = []
+    launch_failed_changes: list[ReconcileChange] = []
     for running_job in running_snapshot:
         run_id = running_job.current_run_id
         if run_id and native_run_marker(db, run_id) is not None:
@@ -1015,6 +1230,16 @@ def scheduler_tick(
             # cooperative work labelled quota unknown, so it must not park the
             # whole store as a legacy RUNNING job without a reservation.
             continue
+        if run_id and run_status is None and tick_status(run_id) is RunStatus.PENDING:
+            # A launch that failed after writing its run row leaves exactly
+            # this shape.  Settle it with the launch reason instead of letting
+            # it hold or stop the scheduler; an unprovable or live owner keeps
+            # the existing hold/reconcile path.
+            settled = settle_failed_launch(db, running_job, now=moment)
+            if settled is not None:
+                status_cache[run_id] = RunStatus.FAILED
+                launch_failed_changes.append(settled)
+                continue
         if not run_id or run_id not in reserved_run_ids:
             if run_id and tick_status(run_id) in TERMINAL_RUN_STATUSES:
                 # A terminal run holds no capacity.  Its job is a reconciliation
@@ -1039,6 +1264,7 @@ def scheduler_tick(
             ran=False,
             reason="legacy_running_without_reservation",
             legacy_running_jobs=tuple(legacy_running_jobs),
+            reconciled_changes=tuple(launch_failed_changes),
         )
 
     # 0b. Dispatch-window recovery (ADR-0011 §2.2).  A scheduler killed between
@@ -1123,8 +1349,10 @@ def scheduler_tick(
                     continue
                 status_cache.pop(run_id, None)
 
-    # 1. Startup and periodic reconciliation
-    changes = reconcile_jobs(db, run_status=tick_status, now=moment)
+    # 1. Startup and periodic reconciliation.  Failed-launch settlements are
+    # part of the same evidence list so their release/away accounting runs in
+    # the ordinary branch below.
+    changes = [*launch_failed_changes, *reconcile_jobs(db, run_status=tick_status, now=moment)]
     try:
         deliver_pending(db)
     except (OSError, sqlite3.Error, ValueError):
@@ -1632,7 +1860,7 @@ def scheduler_tick(
                     _default_run_launcher(db, dispatched_job, dec, run_id, memory_lease)
                     memory_lease.handoff()
                 dispatched_count += 1
-            except Exception:
+            except Exception as exc:
                 # Launch failed; inspect durable run existence
                 run_exists = False
                 try:
@@ -1642,6 +1870,10 @@ def scheduler_tick(
                     run_exists = True
 
                 if run_exists:
+                    # Keep the cause with the run: the next tick settles the
+                    # PENDING run with this exact reason (never a scheduler
+                    # exit), and the owner sees it on the failed job.
+                    _record_launch_failure(db, run_id, exc)
                     # A spawned owner may still hold the inherited lock.  Do
                     # not unlock it while its execution state is uncertain.
                     memory_lease.handoff()
@@ -1821,10 +2053,14 @@ def run_scheduler_loop(
     if storage_maintenance is not None:
         startup_reason = _invoke_storage_maintenance(storage_maintenance, "startup")
     if startup_reason is not None:
+        result = TickResult(
+            ran=False, reason="storage_infra", storage_infra_reason=startup_reason
+        )
+        _write_scheduler_status(
+            db, result=result, now=now, holder_id=clean_holder, stopped=True
+        )
         try:
-            return TickResult(
-                ran=False, reason="storage_infra", storage_infra_reason=startup_reason
-            )
+            return result
         finally:
             release_lease(db, lease, now=now)
 
@@ -1834,7 +2070,7 @@ def run_scheduler_loop(
 
     if once:
         try:
-            return scheduler_tick(
+            result = scheduler_tick(
                 db,
                 lease,
                 now=now,
@@ -1850,6 +2086,10 @@ def run_scheduler_loop(
                 readiness_service=readiness_service,
                 launch_guard=launch_guard,
             )
+            _write_scheduler_status(
+                db, result=result, now=now, holder_id=clean_holder, stopped=True
+            )
+            return result
         finally:
             release_lease(db, lease, now=now)
 
@@ -1902,6 +2142,9 @@ def run_scheduler_loop(
                 readiness_service=readiness_service,
                 launch_guard=launch_guard,
             )
+            _write_scheduler_status(
+                db, result=last_tick, now=now, holder_id=clean_holder, stopped=False
+            )
             if not last_tick.ran:
                 if last_tick.reason in _RESUMABLE_HOLD_REASONS:
                     # The hold is reported (reason + job ids) and re-evaluated
@@ -1910,8 +2153,9 @@ def run_scheduler_loop(
                     # distinct hold so a long-lived hold does not flood.
                     if last_tick.reason != hold_logged:
                         logging.getLogger(__name__).warning(
-                            "scheduler hold: %s unresolved=%s repaired=%s",
+                            "scheduler hold: %s legacy=%s unresolved=%s repaired=%s",
                             last_tick.reason,
+                            last_tick.legacy_running_jobs,
                             last_tick.unresolved_running_jobs,
                             last_tick.dispatch_window_repaired,
                         )
@@ -1933,6 +2177,9 @@ def run_scheduler_loop(
                 waited += step
     finally:
         now = now_fn() if now_fn else _utcnow(None)
+        _write_scheduler_status(
+            db, result=last_tick, now=now, holder_id=clean_holder, stopped=True
+        )
         release_lease(db, lease, now=now)
 
     return last_tick
@@ -1946,9 +2193,11 @@ __all__ = [
     "TickResult",
     "acquire_lease",
     "check_lease",
+    "read_scheduler_status",
     "release_lease",
     "renew_lease",
     "run_scheduler_loop",
     "scheduler_tick",
+    "settle_failed_launch",
     "wake_scheduler",
 ]

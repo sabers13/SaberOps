@@ -1,5 +1,5 @@
 {
-  "logic_lines": 182291,
+  "logic_lines": 182738,
   "suppression_comments": 375,
-  "reason": "H57 first gate runs once under the budget cap to learn its peak (ADR-0115)"
+  "reason": "H53 acceptance lineage, H57 first-gate learning and H54 scheduler resilience (ADR-0111, ADR-0112, ADR-0115)"
 }
