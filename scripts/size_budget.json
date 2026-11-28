@@ -1,5 +1,5 @@
 {
-  "logic_lines": 181467,
+  "logic_lines": 181892,
   "suppression_comments": 375,
-  "reason": "H52 scoped skill and worker install for project connects (ADR-0110)"
+  "reason": "H53 proves continuation candidate lineage for acceptance (ADR-0111)"
 }

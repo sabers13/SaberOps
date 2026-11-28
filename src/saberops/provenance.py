@@ -14,6 +14,7 @@ fields and one assertion.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -376,7 +377,94 @@ def _authorize_ordinary_continuation_base(
 
 def execution_authorized_bases(db: Database, run_id: str) -> set[str]:
     """Shared publication/acceptance proof for governed execution start anchors."""
-    return failover_authorized_bases(db, run_id)
+    authorized = failover_authorized_bases(db, run_id)
+    authorized.update(continuation_authorized_bases(db, run_id))
+    return authorized
+
+
+def continuation_authorized_bases(db: Database, run_id: str) -> set[str]:
+    """Return the saved candidate a continuation run may legitimately build on.
+
+    A continuation run (``resume_job from=last_candidate`` or the
+    reject-with-a-note flow) starts its first attempt at the *parent* run's
+    saved candidate rather than at the successor's own base commit, so
+    acceptance and publication must recognize that start.  The reference is
+    durable in the successor's frozen configuration; it authorizes exactly one
+    base and only when every link re-verifies:
+
+    * the reference names a parent run, attempt, candidate and base,
+    * the successor's own base is that same base,
+    * the parent run records the same base, belongs to the same durable job
+      and the same repository,
+    * the named parent attempt's commit is exactly the referenced candidate,
+    * that candidate descends from the base in the repository.
+
+    Anything missing or inconsistent contributes nothing, so a candidate
+    built on unrelated work is still refused.  The caller's check remains an
+    exact membership test (the attempt's own base must be in the set).
+    """
+    authorized: set[str] = set()
+    run = db.get_run(run_id)
+    if run is None or not run.config_json:
+        return authorized
+    try:
+        config = json.loads(run.config_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return authorized
+    if not isinstance(config, dict):
+        return authorized
+    reference = config.get("continuation")
+    if not isinstance(reference, dict):
+        return authorized
+    parent_id = reference.get("parent_run_id")
+    attempt_id = reference.get("attempt_id")
+    candidate_sha = reference.get("candidate_sha")
+    base_sha = reference.get("base_sha")
+    if not (
+        isinstance(parent_id, str)
+        and parent_id
+        and isinstance(attempt_id, str)
+        and attempt_id
+        and isinstance(candidate_sha, str)
+        and candidate_sha
+        and isinstance(base_sha, str)
+        and base_sha
+    ):
+        return authorized
+    if base_sha != run.base_commit:
+        return authorized
+    parent = db.get_run(parent_id)
+    if parent is None or parent.base_commit != base_sha:
+        return authorized
+    from saberops.jobs.store import find_job_for_run
+
+    def _job_of(record: Run) -> str | None:
+        if record.job_id:
+            return record.job_id
+        job = find_job_for_run(db, record.id)
+        return job.job_id if job is not None else None
+
+    if _job_of(parent) != _job_of(run):
+        return authorized
+    try:
+        if Path(parent.target_repo).resolve() != Path(run.target_repo).resolve():
+            return authorized
+        attempt = db.get_attempt(attempt_id)
+    except Exception:
+        return authorized
+    if (
+        attempt is None
+        or attempt.run_id != parent.id
+        or attempt.commit_sha != candidate_sha
+    ):
+        return authorized
+    try:
+        if not GitManager.is_ancestor(run.target_repo, base_sha, candidate_sha):
+            return authorized
+    except Exception:
+        return authorized
+    authorized.add(candidate_sha)
+    return authorized
 
 
 # ---------------------------------------------------------------------------
