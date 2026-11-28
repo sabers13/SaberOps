@@ -279,7 +279,9 @@ a note is refused; a note already recorded on the job (for example one sent
 while the attempt ran) travels with the rejection instead of being lost. An
 already accepted candidate is refused because acceptance is terminal, and a job
 that is still running or already failed refuses too (use `note_job` /
-`redirect_job` while it runs, `resume_job` when it failed).
+`redirect_job` while it runs, `resume_job` when it failed). While work is paused
+it refuses before recording anything — no rejection and no note — and says the
+owner must run `orch resume` first (ADR-0113).
 
 `orch reject <job-or-run-id> [--note TEXT]` is the same flow from the owner's
 terminal; it prints the rejected candidate and the successor run.

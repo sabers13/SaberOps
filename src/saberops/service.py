@@ -453,6 +453,20 @@ class OrchestratorService:
                 f"job {job.job_id} has no gate-proven candidate to reject "
                 f"({projection.reason}).",
             )
+        # Starting the correction is starting work.  Refuse before the first
+        # write when the gate is closed, so a rejection never lands without the
+        # correction that follows it (ADR-0113); the transient closed gate a
+        # fresh store reports is the same one `resume_job` lets through.
+        from saberops.runtime_gate import evaluate_gate
+
+        gate = evaluate_gate(db=self.db)
+        if gate.closed and not gate.transient:
+            raise RunOperationError(
+                "REJECT_PAUSED",
+                f"Work is {gate.label}, so a rejection could not start its "
+                "correction; nothing was recorded and the candidate is unchanged. "
+                "Ask the owner to run `orch resume`, then reject again.",
+            )
         if note and note.strip():
             try:
                 record_note(self.db, job.job_id, note, allow_terminal=True)

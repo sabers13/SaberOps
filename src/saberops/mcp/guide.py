@@ -398,6 +398,8 @@ stays attended.
   travels with it. An already accepted candidate is refused because acceptance
   is terminal; use `note_job` or `redirect_job` while a job runs, and
   `resume_job` when it failed.
+- While work is paused the call refuses before recording anything (no rejection,
+  no note): tell the owner to run `orch resume`, then reject again.
 - One call starts at most one successor. Calling again while the job is running
   returns the successor it already has instead of starting another.
 - `worker_binding` is the folded-in try-worker option: the exact blocked
