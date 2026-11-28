@@ -31,8 +31,10 @@ import json
 import logging
 import shlex
 import sys
-from collections.abc import Sequence
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final
@@ -46,11 +48,15 @@ __all__ = [
     "ADVISOR_SKIPPED_EVENT",
     "ADVISOR_UNAVAILABLE_EVENT",
     "DEFAULT_ADVISOR_CALL_BUDGET",
+    "DEFAULT_ADVISOR_POLL_SECONDS",
     "MAX_ADVICE_CHARS",
+    "MAX_ADVISOR_POLL_SECONDS",
     "AdvisorAdvice",
+    "AdvisorCallHandle",
     "AdvisorConfigError",
     "AdvisorRefused",
     "AdvisorRoute",
+    "advisor_call_status",
     "advisor_command",
     "advisor_prompt_section",
     "advisor_route_or_none",
@@ -60,6 +66,7 @@ __all__ = [
     "clear_advisor_route",
     "load_advisor_route",
     "set_advisor_route",
+    "start_advisor_call",
 ]
 
 _LOG = logging.getLogger(__name__)
@@ -84,6 +91,15 @@ MAX_ADVICE_CHARS: Final[int] = 1200
 DEFAULT_ADVISOR_TIMEOUT_SECONDS: Final[float] = 600.0
 MIN_ADVISOR_TIMEOUT_SECONDS: Final[float] = 1.0
 MAX_ADVISOR_TIMEOUT_SECONDS: Final[float] = 3600.0
+#: The tightest MCP client call cap H37 measured is Codex's 300 s (300,044 ms);
+#: a Claude turn ends at 360 s.  A poll waits below both caps, so the handle
+#: always comes back inside the client's own bound while the advisor's route
+#: bound stays the outer limit of the model turn itself (ADR-0114).
+MAX_ADVISOR_POLL_SECONDS: Final[float] = 240.0
+DEFAULT_ADVISOR_POLL_SECONDS: Final[float] = 60.0
+#: A call that outlives its route bound plus this grace without recording an
+#: outcome was lost with the process that held it (a restarted engine).
+_ADVISOR_LOST_GRACE_SECONDS: Final[float] = 30.0
 _MAX_QUESTION_CHARS: Final[int] = 2000
 _MAX_RECENT_OUTPUT_CHARS: Final[int] = 2000
 _MAX_FAILING_CHECK_CHARS: Final[int] = 1500
@@ -148,6 +164,37 @@ class AdvisorAdvice:
     model: str
     call_id: str
     checkpoint: str = ADVISOR_CHECKPOINT_ON_DEMAND
+
+
+@dataclass(frozen=True)
+class AdvisorCallHandle:
+    """One started advisor call the planner polls for its answer (ADR-0114)."""
+
+    call_id: str
+    run_id: str
+    provider: str
+    model: str
+    call_budget: int
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class _PreparedAdvisorCall:
+    """One call that passed every pre-flight check and recorded its start."""
+
+    route: AdvisorRoute
+    call_id: str
+    call_seq: int
+    repo: Path | str
+    run_id: str
+    attempt_id: str | None
+    question: str
+    prompt: str
+    base_sha: str
+
+    @property
+    def prompt_bytes(self) -> int:
+        return len(self.prompt.encode("utf-8"))
 
 
 def _project_state_dir(repo: Path | str, *, create: bool) -> Path:
@@ -564,7 +611,7 @@ def _refusal_payload(advisor: AdvisorRoute, reason: str, **extra: Any) -> dict[s
     }
 
 
-def ask_advisor(
+def _prepare_advisor_call(
     db: Any,
     *,
     repo: Path | str,
@@ -577,13 +624,10 @@ def ask_advisor(
     attempts: Sequence[Attempt] = (),
     base_sha: str,
     prior_worktree: Path | str | None = None,
-) -> AdvisorAdvice:
-    """Ask the configured advisor once; refuse with a reason when it cannot run.
+) -> _PreparedAdvisorCall:
+    """Check, record and render one advisor call; refuse before any process."""
+    from saberops.db import current_iso_timestamp
 
-    The run continues whatever the answer: :class:`AdvisorRefused` is evidence,
-    never a failure of the work.  Off, paused, spent budget and an unavailable
-    route are all refused before a process starts.
-    """
     route = advisor_route_or_none(repo)
     if route is None:
         raise AdvisorRefused(
@@ -656,6 +700,8 @@ def ask_advisor(
             "model": route.model,
             "call_index": call_seq,
             "call_budget": route.call_budget,
+            "timeout_seconds": route.timeout_seconds,
+            "started_at": current_iso_timestamp(),
             "question": _bounded(question, _MAX_QUESTION_CHARS),
         },
     )
@@ -683,9 +729,26 @@ def ask_advisor(
         checks=checks,
         diff_text=diff_text,
     )
+    return _PreparedAdvisorCall(
+        route=route,
+        call_id=call_id,
+        call_seq=call_seq,
+        repo=repo,
+        run_id=run_id,
+        attempt_id=attempt_id,
+        question=question,
+        prompt=prompt,
+        base_sha=base_sha,
+    )
 
+
+def _run_prepared_call(
+    db: Any, prepared: _PreparedAdvisorCall, *, registry: Any
+) -> AdvisorAdvice:
+    """Run one prepared call and record its usage, advice or refusal."""
+    route = prepared.route
     adapter = registry.get(route.provider)
-    if adapter is None:  # pragma: no cover - checked above
+    if adapter is None:  # pragma: no cover - checked when the call is prepared
         raise AdvisorRefused(
             "ADVISOR_UNAVAILABLE",
             "no worker adapter is registered for the advisor provider",
@@ -693,10 +756,12 @@ def ask_advisor(
     result: Any = None
     scratch: Path | None = None
     try:
-        scratch = _create_scratch(repo, run_id, call_seq, base_sha)
+        scratch = _create_scratch(
+            prepared.repo, prepared.run_id, prepared.call_seq, prepared.base_sha
+        )
         result = adapter.run(
             WorkerRequest(
-                task=prompt,
+                task=prepared.prompt,
                 worktree_path=scratch,
                 model=route.model,
                 timeout_seconds=route.timeout_seconds,
@@ -707,23 +772,23 @@ def ask_advisor(
         reason = f"advisor call failed: {exc.__class__.__name__}"
         _record_event(
             db,
-            run_id,
+            prepared.run_id,
             ADVISOR_UNAVAILABLE_EVENT,
-            attempt_id=attempt_id,
-            payload=_refusal_payload(route, reason),
+            attempt_id=prepared.attempt_id,
+            payload=_refusal_payload(route, reason, call_id=prepared.call_id),
         )
         raise AdvisorRefused("ADVISOR_UNAVAILABLE", reason) from exc
     finally:
         if scratch is not None:
-            _remove_scratch(repo, scratch)
+            _remove_scratch(prepared.repo, scratch)
 
     _record_usage(
         db,
-        run_id=run_id,
-        attempt_id=attempt_id,
-        call_id=call_id,
+        run_id=prepared.run_id,
+        attempt_id=prepared.attempt_id,
+        call_id=prepared.call_id,
         route=route,
-        prompt_bytes=len(prompt.encode("utf-8")),
+        prompt_bytes=prepared.prompt_bytes,
         result=result,
     )
     status = getattr(result, "status", None)
@@ -745,12 +810,13 @@ def ask_advisor(
             reason = f"advisor call returned {getattr(status, 'value', status)}"
         _record_event(
             db,
-            run_id,
+            prepared.run_id,
             ADVISOR_UNAVAILABLE_EVENT,
-            attempt_id=attempt_id,
+            attempt_id=prepared.attempt_id,
             payload=_refusal_payload(
                 route,
                 reason,
+                call_id=prepared.call_id,
                 detail=_bounded(getattr(result, "error", None), 300),
                 **extra,
             ),
@@ -765,24 +831,26 @@ def ask_advisor(
     if not text:
         _record_event(
             db,
-            run_id,
+            prepared.run_id,
             ADVISOR_UNAVAILABLE_EVENT,
-            attempt_id=attempt_id,
-            payload=_refusal_payload(route, "advisor returned no advice text"),
+            attempt_id=prepared.attempt_id,
+            payload=_refusal_payload(
+                route, "advisor returned no advice text", call_id=prepared.call_id
+            ),
         )
         raise AdvisorRefused("ADVISOR_UNAVAILABLE", "advisor returned no advice text")
 
     _record_event(
         db,
-        run_id,
+        prepared.run_id,
         ADVISOR_ADVICE_EVENT,
-        attempt_id=attempt_id,
+        attempt_id=prepared.attempt_id,
         payload={
             "checkpoint": ADVISOR_CHECKPOINT_ON_DEMAND,
-            "call_id": call_id,
+            "call_id": prepared.call_id,
             "provider": route.provider,
             "model": route.model,
-            "question": _bounded(question, _MAX_QUESTION_CHARS),
+            "question": _bounded(prepared.question, _MAX_QUESTION_CHARS),
             "advice": text,
         },
     )
@@ -790,8 +858,168 @@ def ask_advisor(
         advice=text,
         provider=route.provider,
         model=route.model,
-        call_id=call_id,
+        call_id=prepared.call_id,
     )
+
+
+def ask_advisor(
+    db: Any,
+    *,
+    repo: Path | str,
+    run_id: str,
+    registry: Any,
+    attempt_id: str | None,
+    task: str,
+    question: str,
+    plan_steps: Sequence[Any] = (),
+    attempts: Sequence[Attempt] = (),
+    base_sha: str,
+    prior_worktree: Path | str | None = None,
+) -> AdvisorAdvice:
+    """Ask the configured advisor once; refuse with a reason when it cannot run.
+
+    The run continues whatever the answer: :class:`AdvisorRefused` is evidence,
+    never a failure of the work.  Off, paused, spent budget and an unavailable
+    route are all refused before a process starts.
+    """
+    prepared = _prepare_advisor_call(
+        db,
+        repo=repo,
+        run_id=run_id,
+        registry=registry,
+        attempt_id=attempt_id,
+        task=task,
+        question=question,
+        plan_steps=plan_steps,
+        attempts=attempts,
+        base_sha=base_sha,
+        prior_worktree=prior_worktree,
+    )
+    return _run_prepared_call(db, prepared, registry=registry)
+
+
+def start_advisor_call(
+    db: Any,
+    *,
+    repo: Path | str,
+    run_id: str,
+    registry: Any,
+    attempt_id: str | None,
+    task: str,
+    question: str,
+    plan_steps: Sequence[Any] = (),
+    attempts: Sequence[Attempt] = (),
+    base_sha: str,
+    prior_worktree: Path | str | None = None,
+    on_advice: Callable[[AdvisorAdvice], None] | None = None,
+) -> AdvisorCallHandle:
+    """Start one advisor call in the background and return its handle.
+
+    The model turn does not run inside the caller's request: H37's Codex client
+    gives up a ``tools/call`` at 300 s and a Claude turn at 360 s, so advice that
+    takes longer still has to arrive.  The turn runs on a daemon thread, records
+    its advice or refusal on the run as ``ask_advisor`` always has, and the
+    planner polls :func:`advisor_call_status` for it (ADR-0114).
+    """
+    prepared = _prepare_advisor_call(
+        db,
+        repo=repo,
+        run_id=run_id,
+        registry=registry,
+        attempt_id=attempt_id,
+        task=task,
+        question=question,
+        plan_steps=plan_steps,
+        attempts=attempts,
+        base_sha=base_sha,
+        prior_worktree=prior_worktree,
+    )
+
+    def _work() -> None:
+        try:
+            advice = _run_prepared_call(db, prepared, registry=registry)
+        except AdvisorRefused:
+            # The refusal is already recorded on the run as evidence.
+            return
+        except Exception:  # noqa: BLE001 - evidence never kills the server
+            _LOG.warning("advisor call %s ended unexpectedly", prepared.call_id,
+                         exc_info=True)
+            return
+        if on_advice is not None:
+            try:
+                on_advice(advice)
+            except Exception:  # noqa: BLE001 - the run record is the evidence
+                _LOG.warning("could not record advice for %s", prepared.call_id)
+
+    threading.Thread(
+        target=_work, name=f"advisor-{prepared.call_id}", daemon=True
+    ).start()
+    route = prepared.route
+    return AdvisorCallHandle(
+        call_id=prepared.call_id,
+        run_id=prepared.run_id,
+        provider=route.provider,
+        model=route.model,
+        call_budget=route.call_budget,
+        timeout_seconds=route.timeout_seconds,
+    )
+
+
+def advisor_call_status(db: Any, job: Any, call_id: str) -> dict[str, Any]:
+    """Read one started call's outcome from the job's durable run records.
+
+    ``status`` is ``answered``, ``refused``, ``running``, ``lost`` or
+    ``unknown``.  A poll never starts a second model turn; a call that outlived
+    its own route bound with no recorded outcome was lost with the process that
+    held it, so the planner is told to ask again instead of polling forever.
+    """
+    run_ids: list[str] = [
+        str(run_id) for run_id in getattr(job, "run_ids", ()) or () if run_id
+    ]
+    current = getattr(job, "current_run_id", None)
+    if current and current not in run_ids:
+        run_ids.append(str(current))
+    for run_id in run_ids:
+        for event in _events(db, run_id, ADVISOR_ADVICE_EVENT):
+            payload = dict(event.payload or {})
+            if payload.get("call_id") == call_id:
+                return {"run_id": run_id, **payload, "status": "answered"}
+        for event in _events(db, run_id, ADVISOR_UNAVAILABLE_EVENT):
+            payload = dict(event.payload or {})
+            if payload.get("call_id") == call_id:
+                return {"run_id": run_id, **payload, "status": "refused"}
+        for event in _events(db, run_id, ADVISOR_CALL_EVENT):
+            payload = dict(event.payload or {})
+            if payload.get("call_id") != call_id:
+                continue
+            if _call_is_lost(payload):
+                return {
+                    "run_id": run_id,
+                    **payload,
+                    "status": "lost",
+                    "reason": (
+                        f"advisor call {call_id} did not answer within its own "
+                        "route bound; the engine that held it ended, so ask again"
+                    ),
+                }
+            return {"run_id": run_id, **payload, "status": "running"}
+    return {"call_id": call_id, "status": "unknown"}
+
+
+def _call_is_lost(payload: dict[str, Any]) -> bool:
+    """Whether a started call can no longer be running anywhere."""
+    started_raw = payload.get("started_at")
+    bound = payload.get("timeout_seconds")
+    if not isinstance(started_raw, str) or not isinstance(bound, (int, float)):
+        return False
+    try:
+        started = datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    age = (datetime.now(UTC) - started).total_seconds()
+    return age > float(bound) + _ADVISOR_LOST_GRACE_SECONDS
 
 
 def advisor_view_for_job(db: Any, job: Any) -> dict[str, Any]:

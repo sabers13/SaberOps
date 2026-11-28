@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ from saberops.advisor import (
     ADVISOR_SKIPPED_EVENT,
     ADVISOR_UNAVAILABLE_EVENT,
     DEFAULT_ADVISOR_TIMEOUT_SECONDS,
+    MAX_ADVISOR_POLL_SECONDS,
     AdvisorRefused,
     advisor_route_path,
     advisor_view_for_job,
@@ -130,6 +133,41 @@ def _registry_for(rig: RigEnvironment) -> Any:
         lease=OrchestratorLease(state_dir / "lease.json"),
     )
     return build_default_registry(context)
+
+
+def _poll_advisor(
+    registry: Any, job_id: str, call_id: str, *, wait_seconds: float = 10.0
+) -> dict[str, Any]:
+    """Poll one started call, bounded, exactly as a planner does (ADR-0114)."""
+    result: dict[str, Any] = {"status": "running", "call_id": call_id}
+    deadline = time.monotonic() + 60.0
+    while result["status"] == "running":
+        assert time.monotonic() < deadline, f"advisor call {call_id} never finished"
+        result = registry.call(
+            "ask_advisor",
+            {"job_id": job_id, "call_id": call_id, "wait_seconds": wait_seconds},
+        )
+    return result
+
+
+def _ask_over_mcp(
+    registry: Any,
+    job_id: str,
+    question: str,
+    *,
+    wait_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Start one advisor call over MCP and poll it to an answer."""
+    started = registry.call(
+        "ask_advisor",
+        {"job_id": job_id, "question": question, "wait_seconds": wait_seconds},
+    )
+    if started["status"] == "answered":
+        return dict(started)
+    assert started["status"] in {"started", "running"}, started
+    return _poll_advisor(
+        registry, job_id, started["call_id"], wait_seconds=wait_seconds
+    )
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -254,21 +292,178 @@ def test_planner_asks_over_mcp_and_the_run_records_it(
 
     registry = _registry_for(rig)
     assert "ask_advisor" in registry.names()
-    result = registry.call(
-        "ask_advisor", {"job_id": job_id, "question": QUESTION}
-    )
+    result = _ask_over_mcp(registry, job_id, QUESTION)
+    assert result["status"] == "answered"
     assert result["advice"] == ADVICE
     assert result["provider"] == "codex"
     advice = db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT)
     assert len(advice) == 1
     assert (advice[0].payload or {})["question"] == QUESTION
+    # The start record carries what a poll needs to tell running from lost.
+    started = db.get_events_by_type(run_id, ADVISOR_CALL_EVENT)
+    assert len(started) == 1
+    payload = started[0].payload or {}
+    assert payload["started_at"]
+    assert payload["timeout_seconds"] == DEFAULT_ADVISOR_TIMEOUT_SECONDS
 
     # The per-job budget is shared with the worker path.
-    registry.call("ask_advisor", {"job_id": job_id, "question": "second"})
-    registry.call("ask_advisor", {"job_id": job_id, "question": "third"})
+    _ask_over_mcp(registry, job_id, "second")
+    _ask_over_mcp(registry, job_id, "third")
     with pytest.raises(ToolError) as refused:
         registry.call("ask_advisor", {"job_id": job_id, "question": "fourth"})
     assert "ADVISOR_BUDGET_EXHAUSTED" in str(refused.value)
+
+
+def test_h56_a_slow_advisor_never_runs_inside_the_planner_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first call returns a handle; the advice arrives on a later poll.
+
+    This is the shape that fixes H37 N7: a 5 s fake turn cannot finish inside
+    the start call, so the planner gets ``started`` plus a ``call_id`` and a
+    zero-wait poll reports it still running instead of an empty result.
+    """
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    db = rig.db()
+    rig.set_worker_mode("commit", report_text=ADVICE, advisor_delay_seconds=5)
+    set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL)
+    job_id, run_id = _run_job(rig, goal="Poll a slow advisor", max_attempts=1)
+
+    registry = _registry_for(rig)
+    started = registry.call("ask_advisor", {"job_id": job_id, "question": QUESTION})
+    assert started["status"] == "started"
+    assert started["job_id"] == job_id and started["run_id"] == run_id
+    assert started["call_id"] == "advisor_1"
+    assert "advice" not in started
+    assert "call_id" in started["next_action"]
+
+    running = registry.call(
+        "ask_advisor",
+        {"job_id": job_id, "call_id": started["call_id"], "wait_seconds": 0},
+    )
+    assert running["status"] == "running"
+    assert running["call_budget"] == 3
+
+    result = _poll_advisor(registry, job_id, started["call_id"])
+    assert result["status"] == "answered"
+    assert result["advice"] == ADVICE
+    advice = db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT)
+    assert len(advice) == 1
+    assert (advice[0].payload or {})["call_id"] == "advisor_1"
+
+
+def test_h56_a_refused_call_is_polled_to_its_typed_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call that fails in the background still reports why, once."""
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    db = rig.db()
+    rig.set_worker_mode("commit", report_text=ADVICE, advisor_delay_seconds=3600)
+    set_advisor_route(
+        rig.repo, provider="codex", model=ADVISOR_MODEL, timeout_seconds=2
+    )
+    job_id, run_id = _run_job(rig, goal="Poll a hung advisor", max_attempts=1)
+
+    registry = _registry_for(rig)
+    started = registry.call("ask_advisor", {"job_id": job_id, "question": QUESTION})
+    assert started["status"] == "started"
+    with pytest.raises(ToolError) as refused:
+        registry.call(
+            "ask_advisor",
+            {"job_id": job_id, "call_id": started["call_id"], "wait_seconds": 10},
+        )
+    message = str(refused.value)
+    assert "ADVISOR_UNAVAILABLE" in message
+    assert f"advisor route codex/{ADVISOR_MODEL} timed out after 2s" in message
+    unavailable = db.get_events_by_type(run_id, ADVISOR_UNAVAILABLE_EVENT)
+    assert len(unavailable) == 1
+    assert (unavailable[0].payload or {})["call_id"] == "advisor_1"
+
+
+def test_h56_a_call_lost_with_its_engine_is_reported_not_polled_forever(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A poll after the engine restarted says ask again, it never hangs."""
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    db = rig.db()
+    rig.set_worker_mode("commit", report_text=ADVICE)
+    set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL)
+    job_id, run_id = _run_job(rig, goal="A lost advisor call", max_attempts=1)
+
+    old = datetime.now(UTC) - timedelta(hours=1)
+    db.record_event(
+        run_id,
+        ADVISOR_CALL_EVENT,
+        payload={
+            "checkpoint": "on_demand",
+            "call_id": "advisor_9",
+            "provider": "codex",
+            "model": ADVISOR_MODEL,
+            "call_index": 9,
+            "call_budget": 3,
+            "timeout_seconds": 2.0,
+            "started_at": old.isoformat(),
+            "question": QUESTION,
+        },
+    )
+    registry = _registry_for(rig)
+    result = registry.call(
+        "ask_advisor",
+        {"job_id": job_id, "call_id": "advisor_9", "wait_seconds": 0},
+    )
+    assert result["status"] == "lost"
+    assert "ask again" in str(result["reason"])
+
+    with pytest.raises(ToolError):
+        registry.call(
+            "ask_advisor",
+            {"job_id": job_id, "call_id": "advisor_does_not_exist", "wait_seconds": 0},
+        )
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(420)
+def test_h56_an_advisor_slower_than_the_client_cap_still_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H37 N7: a turn slower than Codex's 300 s cap answers through polls.
+
+    The fake advisor takes 301 s, longer than the tightest measured client call
+    cap (300 s).  Every tools/call stays under the 240 s poll bound, the handle
+    comes back immediately, and the answer is recorded on the run.
+    """
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    db = rig.db()
+    rig.set_worker_mode("commit", report_text=ADVICE, advisor_delay_seconds=301)
+    set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL)
+    job_id, run_id = _run_job(rig, goal="A very slow advisor", max_attempts=1)
+
+    registry = _registry_for(rig)
+    started = registry.call("ask_advisor", {"job_id": job_id, "question": QUESTION})
+    assert started["status"] == "started"
+    call_id = started["call_id"]
+    durations = [0.0]
+    status: dict[str, Any] = started
+    while status["status"] in {"started", "running"}:
+        tick = time.monotonic()
+        status = registry.call(
+            "ask_advisor",
+            {
+                "job_id": job_id,
+                "call_id": call_id,
+                "wait_seconds": MAX_ADVISOR_POLL_SECONDS,
+            },
+        )
+        durations.append(time.monotonic() - tick)
+        assert len(durations) <= 4, status
+    assert status["status"] == "answered", status
+    assert status["advice"] == ADVICE
+    # No single tool call approached Codex's measured 300 s cap.
+    assert max(durations) < 300.0
+    assert all(duration <= MAX_ADVISOR_POLL_SECONDS + 5 for duration in durations)
+    advice = db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT)
+    assert len(advice) == 1
+    assert (advice[0].payload or {})["advice"] == ADVICE
 
 
 def test_paused_store_refuses_the_advisor(

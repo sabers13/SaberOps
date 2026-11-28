@@ -40,6 +40,7 @@ this client is not the writer.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from collections.abc import Callable, Mapping
@@ -2095,23 +2096,43 @@ def _doctor_fix(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
 
 
 def _ask_advisor(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Ask the project's configured advisor one bounded question (ADR-0034).
+    """Start one advisor call, or poll a started call for its answer.
 
     The tool exists only while the session's project has an advisor route; an
     off route, a paused store or a spent per-job budget is a typed refusal.
+    The model turn runs in the background (ADR-0114): no call ever holds the
+    planner past its client's cap, and the advice is recorded on the run
+    whether the planner is still polling or not.
     """
-    from saberops.advisor import AdvisorRefused, ask_advisor
+    from saberops.advisor import (
+        DEFAULT_ADVISOR_POLL_SECONDS,
+        AdvisorRefused,
+        start_advisor_call,
+    )
     from saberops.jobs.service import get_job
     from saberops.workers.registry import AdapterRegistry
 
     job_id = _require_text(arguments, "job_id", what="job_id")
-    question = _require_text(arguments, "question", what="question")
     db = context.database(read_only=False)
     if db is None:  # pragma: no cover - a writable context always has a database
         raise ToolError("owner database is unavailable")
     job = get_job(db, job_id)
     if job is None:
         raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id})
+    call_id = str(arguments.get("call_id") or "").strip()
+    wait_seconds = _advisor_wait_seconds(
+        arguments,
+        default=(
+            DEFAULT_ADVISOR_POLL_SECONDS if call_id else 0.0
+        ),
+    )
+
+    if call_id:
+        return _poll_advisor_call(
+            db, job_id=job_id, job=job, call_id=call_id, wait_seconds=wait_seconds
+        )
+
+    question = _require_text(arguments, "question", what="question")
     run_ids = [run_id for run_id in getattr(job, "run_ids", ()) if run_id]
     run_id = job.current_run_id or (run_ids[-1] if run_ids else None)
     if not run_id:
@@ -2125,8 +2146,22 @@ def _ask_advisor(context: ServerContext, arguments: Mapping[str, Any]) -> dict[s
         raise NotFoundError(f"unknown run for job: {run_id}", data={"run_id": run_id})
     attempts = db.get_attempts_for_run(run_id)
     attempt = attempts[-1] if attempts else None
+
+    def _record_ledger(advice: Any) -> None:
+        context.ledger.append(
+            "advisor_advice",
+            {
+                "job_id": job_id,
+                "run_id": run_id,
+                "call_id": advice.call_id,
+                "provider": advice.provider,
+                "model": advice.model,
+            },
+            key=f"advisor:{run_id}:{advice.call_id}",
+        )
+
     try:
-        advice = ask_advisor(
+        started = start_advisor_call(
             db,
             repo=job.repo,
             run_id=run_id,
@@ -2139,29 +2174,90 @@ def _ask_advisor(context: ServerContext, arguments: Mapping[str, Any]) -> dict[s
                 (attempt.base_sha if attempt is not None else None) or run.base_commit
             ),
             prior_worktree=attempt.worktree_path if attempt is not None else None,
+            on_advice=_record_ledger,
         )
     except AdvisorRefused as exc:
         raise ToolError(f"{exc.code}: {exc}", data={"code": exc.code}) from exc
-    context.ledger.append(
-        "advisor_advice",
-        {
-            "job_id": job_id,
-            "run_id": run_id,
-            "call_id": advice.call_id,
-            "provider": advice.provider,
-            "model": advice.model,
-        },
-        key=f"advisor:{run_id}:{advice.call_id}",
+    handle = _poll_advisor_call(
+        db, job_id=job_id, job=job, call_id=started.call_id, wait_seconds=wait_seconds
     )
-    return {
+    if handle["status"] == "running":
+        handle["status"] = "started"
+    return handle
+
+
+def _advisor_wait_seconds(
+    arguments: Mapping[str, Any], *, default: float
+) -> float:
+    """One bounded wait, below the tightest measured MCP client cap."""
+    from saberops.advisor import MAX_ADVISOR_POLL_SECONDS
+
+    raw = arguments.get("wait_seconds")
+    if raw is None:
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise InvalidParamsError("wait_seconds must be a number of seconds")
+    seconds = float(raw)
+    if not math.isfinite(seconds) or seconds < 0:
+        raise InvalidParamsError("wait_seconds must be zero or more seconds")
+    return min(seconds, MAX_ADVISOR_POLL_SECONDS)
+
+
+def _poll_advisor_call(
+    db: Any,
+    *,
+    job_id: str,
+    job: Any,
+    call_id: str,
+    wait_seconds: float,
+) -> dict[str, Any]:
+    """Wait on one started call, exactly like ``wait_job`` waits on a job."""
+    from saberops.advisor import MAX_ADVISOR_POLL_SECONDS, advisor_call_status
+
+    deadline = time.monotonic() + wait_seconds
+    status = advisor_call_status(db, job, call_id)
+    while status["status"] == "running":
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.5, remaining))
+        status = advisor_call_status(db, job, call_id)
+
+    state = status["status"]
+    if state == "unknown":
+        raise NotFoundError(
+            f"unknown advisor call: {call_id}",
+            data={"job_id": job_id, "call_id": call_id},
+        )
+    if state == "refused":
+        raise ToolError(
+            f"ADVISOR_UNAVAILABLE: {status.get('reason') or 'the advisor call failed'}",
+            data={"code": "ADVISOR_UNAVAILABLE", "call_id": call_id},
+        )
+    payload: dict[str, Any] = {
         "v": SNAPSHOT_SCHEMA_VERSION,
+        "status": state,
         "job_id": job_id,
-        "run_id": run_id,
-        "call_id": advice.call_id,
-        "provider": advice.provider,
-        "model": advice.model,
-        "advice": advice.advice,
+        "run_id": status.get("run_id"),
+        "call_id": call_id,
+        "provider": status.get("provider"),
+        "model": status.get("model"),
+        "call_budget": status.get("call_budget"),
+        "timeout_seconds": status.get("timeout_seconds"),
     }
+    if state == "answered":
+        payload["advice"] = status.get("advice")
+        return payload
+    if state == "lost":
+        payload["reason"] = status.get("reason")
+        payload["next_action"] = "ask_advisor with a new question"
+        return payload
+    payload["started_at"] = status.get("started_at")
+    payload["next_action"] = (
+        f"call ask_advisor with this call_id again to fetch the answer "
+        f"(wait_seconds up to {MAX_ADVISOR_POLL_SECONDS:g})"
+    )
+    return payload
 
 
 def _propose_mode_change(
@@ -2929,17 +3025,27 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     # removes the tool entirely for this project session rather than offering
     # a call that can only refuse.
     if context.repo is not None and advisor_route_or_none(context.repo) is not None:
+        from saberops.advisor import MAX_ADVISOR_POLL_SECONDS
+
         register(
             "ask_advisor",
             "Ask the project's configured advisor one short question about a job's "
             "current run; it reads a disposable worktree and returns advice only. "
-            "Off unless the owner set an advisor route; bounded per job.",
+            "The call runs in the background so no tools/call outlasts the client's "
+            "own cap: the first call returns a handle, and call_id polls for the "
+            "answer. Off unless the owner set an advisor route; bounded per job.",
             _schema(
                 {
                     "job_id": {"type": "string", "minLength": 1},
                     "question": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "call_id": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "wait_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": MAX_ADVISOR_POLL_SECONDS,
+                    },
                 },
-                required=("job_id", "question"),
+                required=("job_id",),
             ),
             _ask_advisor,
             mutating=False,

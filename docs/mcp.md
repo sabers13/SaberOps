@@ -76,7 +76,7 @@ first missing step with no stored cursor.
 | `discard_note` | yes | `note_id` | `saberops.jobs.service.discard_note` (drop an undelivered note deliberately) |
 | `resume_job` | yes | `job_id`, `from` (`scratch`/`last_candidate`), `note`, `worker_binding` | `saberops.service.OrchestratorService.resume_job` (retry/continue paths) |
 | `reject_candidate` | yes | `job_id`, `note` | `saberops.service.OrchestratorService.reject_job` (records the canonical rejection, then resumes from the saved candidate) |
-| `ask_advisor` | no | `job_id`, `question` | `saberops.advisor.ask_advisor` (only listed when this project has an advisor route; see below) |
+| `ask_advisor` | no | `job_id`, `question` or `call_id`, `wait_seconds` | `saberops.advisor.start_advisor_call` / `advisor_call_status` (only listed when this project has an advisor route; see below) |
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
 | `read_evidence` | no | `path` | guarded evidence reader |
 | `list_questions` | no | `status`, `run_id` | `saberops.questions.OwnerQuestionQueue.questions` |
@@ -329,6 +329,15 @@ budget is spent; a call that outlasts its bound ends with a timeout that names
 the route and the bound. Its route, call budget, calls and advice appear in the
 `advisor` block of `get_job`, `tail_job` and `catch_up`, and its calls are
 counted in per-job usage.
+
+The model turn never runs inside the planner's `tools/call` (ADR-0114). The
+first `ask_advisor` call records the call and returns a handle with
+`status: "started"`; calling it again with that `call_id` waits up to
+`wait_seconds` (default 60 s, never more than 240 s) for the answer and returns
+`status: "answered"` with the advice, `status: "running"` while the turn is
+still going, or `status: "lost"` when the engine that held it ended before it
+answered. The answer or refusal is recorded on the run either way, so a late
+answer is still retrievable through `catch_up`'s `advisor` block.
 
 `answer_question` accepts only `authority: "PLAN"` (legacy `ORCHESTRATOR` is
 accepted and mapped). Owner authority is not exercisable over MCP:
