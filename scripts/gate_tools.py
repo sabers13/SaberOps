@@ -373,8 +373,14 @@ def build_cgroup_scope_prefix(
     *,
     unit_name: str,
     meta_dir: Path,
+    hard_cap: bool = False,
 ) -> list[str]:
-    """Return ``systemd-run --user --scope`` prefix with per-step ``MemoryHigh``."""
+    """Return ``systemd-run --user --scope`` prefix with per-step ``MemoryHigh``.
+
+    ``hard_cap`` additionally sets ``MemoryMax`` to the same grant, so a first
+    run used to learn a step's real peak is killed instead of being allowed to
+    exceed the budget it was admitted under.
+    """
     runner = systemd_run_path()
     if runner is None:
         return []
@@ -415,6 +421,7 @@ def build_cgroup_scope_prefix(
         f"--unit={unit_name}",
         "-p",
         f"MemoryHigh={mem_high}",
+        *(["-p", f"MemoryMax={mem_high}"] if hard_cap else []),
         "--",
         sys.executable,
         "-c",
@@ -690,6 +697,57 @@ def _read_json_dict(path: Path) -> dict[str, Any] | None:
     return decoded if isinstance(decoded, dict) else None
 
 
+class MemoryRefusalError(TimeoutError):
+    """A measured first run needs more memory than the host can grant.
+
+    Subclasses ``TimeoutError`` so every caller that already handles a budget
+    wait fails closed instead of crashing, while the message says the step was
+    measured and refused rather than still waiting.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        step: str = "",
+        size_bucket: str = "",
+        cap_bytes: int = 0,
+        measured_bytes: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.step = step
+        self.size_bucket = size_bucket
+        self.cap_bytes = cap_bytes
+        self.measured_bytes = measured_bytes
+
+
+def memory_refusal_message(
+    step: str,
+    size_bucket: str,
+    cap_bytes: int,
+    measured_bytes: int,
+    *,
+    oom_kill: int = 0,
+    available_bytes: int | None = None,
+) -> str:
+    """One-line memory refusal naming the step, the measurement and the budget."""
+    if available_bytes is None:
+        detail = (
+            f"first run was killed at the {cap_bytes}-byte budget cap "
+            f"(measured={measured_bytes} bytes, oom_kill={oom_kill})"
+        )
+    else:
+        detail = (
+            f"an earlier capped first run was killed at {cap_bytes} bytes "
+            f"and only {available_bytes} bytes are available"
+        )
+    return (
+        f"MEMORY_REFUSED: step={step}:{size_bucket} {detail}; it needs more memory "
+        "than the host can currently grant. Free memory or reduce concurrent work, "
+        "then retry."
+    )
+
+
 @dataclass(frozen=True)
 class MemoryRunStats:
     """Visibility metrics captured for one budgeted heavy step."""
@@ -744,6 +802,7 @@ class MemoryLease:
         size_bucket: str,
         grant_bytes: int,
         wait_seconds: float,
+        probe: bool = False,
     ) -> None:
         self._ledger = ledger
         self.holder_id = holder_id
@@ -754,6 +813,7 @@ class MemoryLease:
         self.size_bucket = size_bucket
         self.grant_bytes = int(grant_bytes)
         self.wait_seconds = float(wait_seconds)
+        self.probe = bool(probe)
         self.cgroup_path: Path | None = None
         self.unit_name: str = ""
         self._released = False
@@ -1008,6 +1068,38 @@ class MemoryLedger:
         with self._locked():
             return self._predict_peak_locked(step, size_bucket)
 
+    def _refused_peak_locked(self, step: str, size_bucket: str) -> int:
+        """Return the cap at which an earlier first run was killed, else 0."""
+        data = self._load_peaks_locked()
+        entry = data["steps"].get(step_key(step, size_bucket))
+        if not isinstance(entry, dict):
+            return 0
+        raw = entry.get("refused_peak_bytes")
+        return int(raw) if isinstance(raw, int) and raw > 0 else 0
+
+    def _has_sample_locked(self, step: str, size_bucket: str) -> bool:
+        """True when this step has a completed run's measured peak."""
+        data = self._load_peaks_locked()
+        entry = data["steps"].get(step_key(step, size_bucket))
+        if not isinstance(entry, dict):
+            return False
+        samples = entry.get("samples", 0)
+        peak = entry.get("peak_bytes", 0)
+        return (
+            isinstance(samples, int)
+            and samples >= 1
+            and isinstance(peak, int)
+            and peak > 0
+        )
+
+    def refused_peak(self, step: str, size_bucket: str = "default") -> int:
+        """Return the recorded first-run refusal cap for ``(step, size_bucket)``.
+
+        Zero means no capped first run has been measured for this step yet.
+        """
+        with self._locked():
+            return self._refused_peak_locked(step, size_bucket)
+
     def predict_per_worker_peak(self, step: str, size_bucket: str = "default") -> int:
         """Return learned per-worker peak bytes, or cold-start per-worker seed."""
         with self._locked():
@@ -1113,6 +1205,39 @@ class MemoryLedger:
                     pw_samples if isinstance(pw_samples, int) else 0
                 ) + 1
             entry["updated_at"] = datetime.now(UTC).isoformat()
+            steps[key] = entry
+            data["steps"] = steps
+            _atomic_write_json(self.peaks_path, data)
+
+    def record_probe_refusal(
+        self,
+        step: str,
+        size_bucket: str,
+        cap_bytes: int,
+        measured_bytes: int,
+    ) -> None:
+        """Record that a capped first run was killed at ``cap_bytes``.
+
+        The capped peak is not a learned size (the run did not finish, so its
+        true peak is unknown and at least ``cap_bytes``).  It is kept separately
+        so a later attempt refuses fast at the same or a tighter budget instead
+        of waiting for memory that will not arrive.
+        """
+        if cap_bytes <= 0:
+            return
+        with self._locked():
+            data = self._load_peaks_locked()
+            steps: dict[str, Any] = data["steps"]
+            key = step_key(step, size_bucket)
+            existing = steps.get(key)
+            entry = dict(existing) if isinstance(existing, dict) else {"samples": 0}
+            observed = max(int(cap_bytes), int(measured_bytes))
+            prev = entry.get("refused_peak_bytes")
+            prev_int = prev if isinstance(prev, int) else 0
+            entry["refused_peak_bytes"] = max(observed, prev_int)
+            count = entry.get("refusal_count", 0)
+            entry["refusal_count"] = (int(count) if isinstance(count, int) else 0) + 1
+            entry["refused_at"] = datetime.now(UTC).isoformat()
             steps[key] = entry
             data["steps"] = steps
             _atomic_write_json(self.peaks_path, data)
@@ -1374,8 +1499,17 @@ class MemoryLedger:
         wait: float | None = None,
         notify: Callable[[str], None] = print,
         freeze_eligible: bool = False,
+        allow_probe: bool = False,
     ) -> MemoryLease:
-        """Reserve ``step:size_bucket`` predicted peak, waiting on pressure or budget."""
+        """Reserve ``step:size_bucket`` predicted peak, waiting on pressure or budget.
+
+        ``allow_probe`` lets a step with no learned sample run once under a hard
+        cap equal to the remaining budget when its cold-start seed does not fit.
+        The caller runs the step and records the measured peak, so the next
+        attempt uses a learned value instead of waiting forever on a guess.  A
+        capped first run that is killed records a refusal; later attempts fail
+        fast with ``MemoryRefusalError`` until the budget grows past it.
+        """
         budget_wait = resolve_wait_seconds(wait)
         guard_enabled = memory_guard_enabled()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -1405,6 +1539,72 @@ class MemoryLedger:
                     if guard_enabled and pstate.get("pressure_active"):
                         blocked_reason = "memory pressure active; holding new grants"
                     elif guard_enabled and remaining is not None and predicted > remaining:
+                        refused = self._refused_peak_locked(step, size_bucket)
+                        if (
+                            refused > 0
+                            and remaining <= refused
+                            and not self._has_sample_locked(step, size_bucket)
+                        ):
+                            message = memory_refusal_message(
+                                step,
+                                size_bucket,
+                                refused,
+                                refused,
+                                available_bytes=remaining,
+                            )
+                            raise MemoryRefusalError(
+                                message,
+                                step=step,
+                                size_bucket=size_bucket,
+                                cap_bytes=refused,
+                                measured_bytes=refused,
+                            )
+                        if (
+                            allow_probe
+                            and remaining > 0
+                            and not live
+                            and not self._has_sample_locked(step, size_bucket)
+                        ):
+                            grant = int(remaining)
+                            notify(
+                                f"first run for step={step}:{size_bucket}: "
+                                f"predicted={predicted} bytes > budget={remaining} "
+                                f"bytes; running once under a {grant}-byte cap to "
+                                "learn the real peak"
+                            )
+                            probe_record: dict[str, Any] = {
+                                "holder_id": holder_id,
+                                "pid": self._pid(),
+                                "worktree": worktree,
+                                "step": step,
+                                "size_bucket": size_bucket,
+                                "grant_bytes": grant,
+                                "started_at": now_wall,
+                                "unit_name": "",
+                                "cgroup_path": "",
+                                "frozen": False,
+                                "frozen_at": 0.0,
+                                "frozen_by_pid": 0,
+                                "freeze_eligible": bool(freeze_eligible),
+                                "freeze_count": 0,
+                                "thaw_count": 0,
+                                "probe": True,
+                            }
+                            _atomic_write_json(meta_path, probe_record)
+                            return MemoryLease(
+                                self,
+                                holder_id,
+                                lock_file,
+                                meta_path,
+                                lock_path,
+                                step=step,
+                                size_bucket=size_bucket,
+                                grant_bytes=grant,
+                                wait_seconds=max(
+                                    0.0, float(self._clock()) - started_mono
+                                ),
+                                probe=True,
+                            )
                         blocked_reason = (
                             f"step={step}:{size_bucket} predicted={predicted} bytes "
                             f"> budget={remaining} bytes ({len(live)} active)"
@@ -1491,12 +1691,17 @@ def run_with_lease(
     background PSI feedback monitoring, measured ``memory.peak`` learning, and
     re-running stopped test invocations without misreporting failure.
 
+    A lease flagged ``probe`` (a step's first run with an unfitting seed) is
+    scoped with a hard ``MemoryMax`` equal to its grant and teaches the step's
+    own peak; a probe killed at that cap raises ``MemoryRefusalError``.
+
     ``freeze_eligible`` marks this as a real gate step, so pressure coordination
     may freeze its cgroup; the same call thaws everything it froze on exit.
     """
-    prefix_builder = scope_prefix_fn or (
-        lambda g, unit, meta: build_cgroup_scope_prefix(g, unit_name=unit, meta_dir=meta)
-    )
+    prefix_builder = scope_prefix_fn
+    # A first-run probe runs under a hard cap; only spend it when a scope can
+    # actually enforce that cap (a custom prefix function owns its own capping).
+    probe_supported = prefix_builder is not None or systemd_run_path() is not None
     attempt = 0
     total_wait = 0.0
     total_freezes = 0
@@ -1527,6 +1732,7 @@ def run_with_lease(
                         wait=wait,
                         notify=notify,
                         freeze_eligible=freeze_eligible,
+                        allow_probe=probe_supported,
                     )
                     owns_lease = True
                     last_grant = lease.grant_bytes
@@ -1538,6 +1744,7 @@ def run_with_lease(
                 lease.set_freeze_eligible()
             if on_lease is not None:
                 on_lease(lease)
+            probe = bool(lease is not None and lease.probe)
 
             workers = (
                 ledger.workers_for_grant(last_grant, step, size_bucket)
@@ -1552,7 +1759,15 @@ def run_with_lease(
                 tempfile.mkdtemp(prefix="saberops-cg-meta-", dir=str(meta_base))
             )
             unit_name = f"saberops-gate-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-            prefix = prefix_builder(last_grant, unit_name, meta_dir)
+            if prefix_builder is None:
+                prefix = build_cgroup_scope_prefix(
+                    last_grant,
+                    unit_name=unit_name,
+                    meta_dir=meta_dir,
+                    hard_cap=probe,
+                )
+            else:
+                prefix = prefix_builder(last_grant, unit_name, meta_dir)
             scoped_cmd = [*prefix, *cmd] if prefix else list(cmd)
 
             env_updates = dict(env or {})
@@ -1640,6 +1855,38 @@ def run_with_lease(
             last_oom = oom_kill
             if observed_peak > best_peak:
                 best_peak = observed_peak
+            # A first run admitted under a hard budget cap either teaches the
+            # step's real peak or proves the step does not fit: a kill at the
+            # cap is a memory refusal, never something to re-run or learn as if
+            # it were a completed run.
+            cap_killed = (
+                probe
+                and lease is not None
+                and not launch_failed
+                and not timed_out
+                and not interrupted
+                and (oom_kill > 0 or (exit_code == 137 and bool(prefix)))
+            )
+            if cap_killed and lease is not None:
+                measured = max(observed_peak, last_grant)
+                message = memory_refusal_message(
+                    lease.step,
+                    lease.size_bucket,
+                    last_grant,
+                    measured,
+                    oom_kill=oom_kill,
+                )
+                ledger.record_probe_refusal(
+                    lease.step, lease.size_bucket, last_grant, measured
+                )
+                notify(message)
+                raise MemoryRefusalError(
+                    message,
+                    step=lease.step,
+                    size_bucket=lease.size_bucket,
+                    cap_bytes=last_grant,
+                    measured_bytes=measured,
+                )
             # A launch failure never ran the target: the scope's peak measures
             # only the launcher wrapper (a few MB).  Learning it would collapse
             # the next grant for this step to that floor, and the following
@@ -2095,6 +2342,10 @@ def _run_passthrough_step(
             on_lease=lambda active: lease_ref.__setitem__(0, active),
             freeze_eligible=True,
         )
+    except MemoryRefusalError as error:
+        print(str(error), flush=True)
+        print("INFRA MEMORY_REFUSED", flush=True)
+        return 3
     except TimeoutError:
         print("INFRA SLOT_WAIT_TIMEOUT", flush=True)
         return 3
@@ -2605,6 +2856,7 @@ class Runner:
                 self.memory_bucket,
                 worktree=str(self.repo),
                 freeze_eligible=True,
+                allow_probe=systemd_run_path() is not None,
             ) as lease:
                 self._active_lease = lease
                 lease.set_freeze_eligible()
@@ -2620,6 +2872,9 @@ class Runner:
                         self.memory_freeze_count, lease.freeze_count()
                     )
                     self._active_lease = None
+        except MemoryRefusalError as error:
+            print(str(error), flush=True)
+            verdict = ("INFRA", "MEMORY_REFUSED", 3, [], [])
         except TimeoutError:
             verdict = ("INFRA", "SLOT_WAIT_TIMEOUT", 3, [], [])
         except Interrupted:

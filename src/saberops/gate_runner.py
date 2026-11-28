@@ -1344,6 +1344,8 @@ class GateRunner:
                     rerun_if_stopped=False,
                     freeze_eligible=True,
                 )
+            except _gt.MemoryRefusalError as exc:
+                raise GateRunnerInfrastructureError(str(exc)) from exc
             except TimeoutError as exc:
                 raise GateRunnerInfrastructureError(
                     f"Gate Runner memory budget wait exceeded: {exc}"

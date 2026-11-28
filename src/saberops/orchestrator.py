@@ -8454,6 +8454,15 @@ def _run_configured_gate(
                     memory_wait_seconds=stats.wait_seconds,
                     memory_freeze_count=stats.freeze_count,
                 )
+        except gt.MemoryRefusalError as exc:
+            return ProcessResult(
+                args=args,
+                exit_code=-1,
+                stdout="",
+                stderr=str(exc),
+                duration_seconds=0,
+                launch_failed=True,
+            )
         except TimeoutError as exc:
             return ProcessResult(
                 args=args,

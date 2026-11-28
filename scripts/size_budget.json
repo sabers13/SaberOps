@@ -1,5 +1,5 @@
 {
-  "logic_lines": 181892,
+  "logic_lines": 182291,
   "suppression_comments": 375,
-  "reason": "H53 proves continuation candidate lineage for acceptance (ADR-0111)"
+  "reason": "H57 first gate runs once under the budget cap to learn its peak (ADR-0115)"
 }

@@ -56,6 +56,9 @@ def test_heavy_step_waits_when_predicted_peak_exceeds_budget_and_starts_when_fre
         available_memory_fn=lambda: avail,
         pressure_fn=lambda: gt.MemoryPressure(0.0, 0.0),
     )
+    # A step that already has a measured sample waits for its budget; only a
+    # step with no sample probes once (H57/ADR-0115 covers that path).
+    ledger.record_peak("full", "full", cold_start)
     entered = threading.Event()
     done = threading.Event()
     seen_grant: dict[str, int] = {}
@@ -763,3 +766,207 @@ def test_parallel_step_grant_does_not_collapse_to_one_worker(
     with pytest.raises(TimeoutError):
         with ledger.acquire("full", "full", wait=0.05, notify=lambda _m: None):
             pass
+
+
+def test_first_run_with_unfitting_seed_runs_once_and_learns_the_peak(
+    tmp_path: Path,
+) -> None:
+    """Covers: H57 -- an empty ledger's first gate runs instead of waiting forever."""
+    reserve = 3 * gt.GB
+    seed = 3 * gt.GB
+    budget = 400 * gt.MIB
+    avail = reserve + budget
+    ledger = gt.MemoryLedger(
+        tmp_path / "ledger",
+        reserve_bytes=reserve,
+        cold_start_peak_bytes=seed,
+        available_memory_fn=lambda: avail,
+        pressure_fn=lambda: gt.MemoryPressure(0.0, 0.0),
+    )
+    measured = 40 * gt.MIB
+    notices: list[str] = []
+    ran_with: list[int] = []
+
+    def learned_scope(_grant: int, _unit: str, meta: Path) -> list[str]:
+        (meta / "memory.peak").write_text(str(measured), encoding="utf-8")
+        return []
+
+    def invoke(
+        _cmd: list[str], _env: dict[str, str], grant: int, _workers: int
+    ) -> tuple[int, bool, bool, int]:
+        ran_with.append(grant)
+        return 0, False, False, 0
+
+    _, stats = gt.run_with_lease(
+        ledger=ledger,
+        step="configured-gate",
+        size_bucket="default",
+        invoke=invoke,
+        cmd=["true"],
+        wait=0.2,
+        notify=notices.append,
+        scope_prefix_fn=learned_scope,
+    )
+
+    # The seed did not fit, so the step ran once under the whole budget cap.
+    assert ran_with == [budget]
+    assert stats.measured_peak_bytes == measured
+    assert stats.wait_seconds < 0.1
+    assert any("running once under a" in notice for notice in notices)
+    assert ledger.predict_peak("configured-gate", "default") == measured
+    assert ledger.refused_peak("configured-gate", "default") == 0
+
+    # The learned value is used from then on: same budget, no second probe.
+    def invoke_again(
+        _cmd: list[str], _env: dict[str, str], grant: int, _workers: int
+    ) -> tuple[int, bool, bool, int]:
+        ran_with.append(grant)
+        return 0, False, False, 0
+
+    gt.run_with_lease(
+        ledger=ledger,
+        step="configured-gate",
+        size_bucket="default",
+        invoke=invoke_again,
+        cmd=["true"],
+        wait=0.2,
+        notify=notices.append,
+        scope_prefix_fn=learned_scope,
+    )
+    assert ran_with == [budget, measured]
+
+
+def test_probe_lease_holds_the_whole_budget_and_teaches_its_step(
+    tmp_path: Path,
+) -> None:
+    """Covers: H57 -- a probe runs alone, and the child command teaches its step."""
+    reserve = 3 * gt.GB
+    budget = 400 * gt.MIB
+    ledger = gt.MemoryLedger(
+        tmp_path / "ledger",
+        reserve_bytes=reserve,
+        cold_start_peak_bytes=3 * gt.GB,
+        available_memory_fn=lambda: reserve + budget,
+        pressure_fn=lambda: gt.MemoryPressure(0.0, 0.0),
+    )
+    lease = ledger.acquire("full", "full", wait=0.0, allow_probe=True)
+    assert lease.probe is True
+    assert lease.grant_bytes == budget
+
+    # No other step can be admitted while the probe holds the whole budget.
+    with pytest.raises(TimeoutError):
+        with ledger.acquire(
+            "configured-gate", "default", wait=0.05, allow_probe=True, notify=lambda _m: None
+        ):
+            pytest.fail("a second step ran beside a first-run probe")
+
+    measured = 120 * gt.MIB
+
+    def learned_scope(_grant: int, _unit: str, meta: Path) -> list[str]:
+        (meta / "memory.peak").write_text(str(measured), encoding="utf-8")
+        return []
+
+    gt.run_with_lease(
+        ledger=ledger,
+        step="full",
+        size_bucket="full",
+        invoke=lambda _c, _e, _g, _w: (0, False, False, 0),
+        cmd=["true"],
+        existing_lease=lease,
+        scope_prefix_fn=learned_scope,
+    )
+    lease.release()
+    assert ledger.predict_peak("full", "full") == measured
+
+
+def test_capped_first_run_reports_memory_refusal_instead_of_waiting(
+    tmp_path: Path,
+) -> None:
+    """Covers: H57 -- a first run killed at the cap refuses fast, then retries when memory grows."""
+    reserve = 3 * gt.GB
+    seed = 3 * gt.GB
+    budget = 400 * gt.MIB
+    avail = [reserve + budget]
+    ledger = gt.MemoryLedger(
+        tmp_path / "ledger",
+        reserve_bytes=reserve,
+        cold_start_peak_bytes=seed,
+        available_memory_fn=lambda: avail[0],
+        pressure_fn=lambda: gt.MemoryPressure(0.0, 0.0),
+    )
+    notices: list[str] = []
+
+    def capped_scope(_grant: int, _unit: str, meta: Path) -> list[str]:
+        (meta / "memory.peak").write_text(str(budget), encoding="utf-8")
+        (meta / "memory.events").write_text(
+            "low 0\nhigh 0\nmax 0\noom 0\noom_kill 1\noom_group_kill 0\n",
+            encoding="utf-8",
+        )
+        return []
+
+    def killed(
+        _cmd: list[str], _env: dict[str, str], _grant: int, _workers: int
+    ) -> tuple[int, bool, bool, int]:
+        return 137, False, False, 0
+
+    started = time.monotonic()
+    with pytest.raises(gt.MemoryRefusalError) as caught:
+        gt.run_with_lease(
+            ledger=ledger,
+            step="configured-gate",
+            size_bucket="default",
+            invoke=killed,
+            cmd=["true"],
+            wait=0.2,
+            notify=notices.append,
+            scope_prefix_fn=capped_scope,
+        )
+    assert time.monotonic() - started < 5.0
+    assert "MEMORY_REFUSED" in str(caught.value)
+    assert "configured-gate:default" in str(caught.value)
+    assert ledger.refused_peak("configured-gate", "default") == budget
+    # The kill is a refusal, not a completed sample.
+    assert ledger.predict_peak("configured-gate", "default") == seed
+
+    # The same budget refuses immediately instead of waiting or running again.
+    second_runs: list[int] = []
+
+    def second(
+        _cmd: list[str], _env: dict[str, str], _grant: int, _workers: int
+    ) -> tuple[int, bool, bool, int]:
+        second_runs.append(1)
+        return 0, False, False, 0
+
+    with pytest.raises(gt.MemoryRefusalError):
+        gt.run_with_lease(
+            ledger=ledger,
+            step="configured-gate",
+            size_bucket="default",
+            invoke=second,
+            cmd=["true"],
+            wait=0.2,
+            notify=notices.append,
+            scope_prefix_fn=capped_scope,
+        )
+    assert second_runs == []
+
+    # More free memory than the refusal cap retries the first run and passes.
+    avail[0] = reserve + 2 * budget
+    measured = 40 * gt.MIB
+
+    def learned_scope(_grant: int, _unit: str, meta: Path) -> list[str]:
+        (meta / "memory.peak").write_text(str(measured), encoding="utf-8")
+        return []
+
+    _, stats = gt.run_with_lease(
+        ledger=ledger,
+        step="configured-gate",
+        size_bucket="default",
+        invoke=lambda _c, _e, _g, _w: (0, False, False, 0),
+        cmd=["true"],
+        wait=0.2,
+        notify=notices.append,
+        scope_prefix_fn=learned_scope,
+    )
+    assert stats.measured_peak_bytes == measured
+    assert ledger.predict_peak("configured-gate", "default") == measured

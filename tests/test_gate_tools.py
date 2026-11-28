@@ -1243,6 +1243,27 @@ def test_cgroup_scope_sets_dynamic_memory_high(
     assert "--unit=saberops-test-unit" in prefix
 
 
+def test_probe_scope_adds_a_hard_memory_max_at_the_grant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Covers: H57 -- a first probe run is killed at its budget instead of exceeding it."""
+    class _Probe:
+        returncode = 0
+
+    monkeypatch.setattr(g, "_systemd_run_probed", False)
+    monkeypatch.setattr(g, "_systemd_run_cache", None)
+    monkeypatch.delenv("SABEROPS_GATE_CGROUP", raising=False)
+    monkeypatch.setattr(g.shutil, "which", lambda name: "/usr/bin/systemd-run")
+    monkeypatch.setattr(g.subprocess, "run", lambda *a, **k: _Probe())
+    grant = 1_500_000_000
+    prefix = g.build_cgroup_scope_prefix(
+        grant, unit_name="saberops-probe-unit", meta_dir=tmp_path, hard_cap=True
+    )
+    assert f"MemoryHigh={grant}" in prefix
+    assert f"MemoryMax={grant}" in prefix
+    assert "--unit=saberops-probe-unit" in prefix
+
+
 def test_cgroup_prefix_probe_failure_falls_back(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

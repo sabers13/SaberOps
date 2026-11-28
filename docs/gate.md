@@ -241,6 +241,15 @@ A recorded `<index>.json` whose pid is dead is unlinked immediately and is never
 shown in a wait notice (`os.kill(pid, 0)`), so a process that died or was
 interrupted cannot leave a phantom "waiting for ..." holder behind.
 
+A step with no learned sample whose cold-start guess exceeds the current budget
+is not left waiting forever (ADR-0115). It runs once, alone, under a hard
+`MemoryMax` equal to the remaining budget, and its measured `memory.peak`
+becomes the learned size. If that first run is killed at the cap, the gate
+records the refusal and reports `INFRA MEMORY_REFUSED` with the cap and
+measurement; later attempts at the same or a tighter budget refuse immediately
+instead of waiting. Steps that already have a sample, and hosts without a usable
+memory scope, keep the normal wait.
+
 ### Wave consolidation test-map policy
 
 Rebuilding the coverage map runs the whole suite under coverage (~10 minutes)
